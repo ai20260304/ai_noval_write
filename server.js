@@ -820,6 +820,134 @@ function memoryRowsFromState(state) {
   return rows;
 }
 
+const RAG_STOP_TERMS = new Set([
+  "本章", "正文", "生成", "必须", "角色", "细纲", "粗纲", "文风", "规则", "目标", "场景", "章节", "输出",
+  "不要", "不能", "需要", "当前", "一个", "两个", "这个", "那个", "如果", "然后", "继续", "推进",
+]);
+
+function compactRagText(text = "", limit = 520) {
+  return String(text || "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, limit);
+}
+
+function ragTerms(text = "") {
+  const terms = new Set();
+  const source = String(text || "").replace(/\s+/g, " ").slice(0, 8000);
+  for (const match of source.match(/[\u4e00-\u9fa5]{2,6}|[A-Za-z0-9_+-]{2,}/g) || []) {
+    const term = match.trim();
+    if (term.length < 2 || RAG_STOP_TERMS.has(term)) continue;
+    terms.add(term.toLowerCase());
+    if (terms.size >= 220) break;
+  }
+  return [...terms];
+}
+
+function chapterDistanceFromRef(ref = "", chapterId = 0) {
+  const target = Number(chapterId) || 0;
+  if (!target) return 99;
+  const numbers = String(ref || "").match(/\d+/g)?.map(Number) || [];
+  if (!numbers.length) return 99;
+  if (numbers.length >= 2) {
+    const start = Math.min(numbers[0], numbers[1]);
+    const end = Math.max(numbers[0], numbers[1]);
+    if (target >= start && target <= end) return 0;
+    return Math.min(Math.abs(target - start), Math.abs(target - end));
+  }
+  return Math.abs(target - numbers[0]);
+}
+
+function readableRagContent(row = {}) {
+  const raw = String(row.content || "");
+  try {
+    const data = JSON.parse(raw);
+    if (data && typeof data === "object") {
+      const detail = data.detailedOutline && typeof data.detailedOutline === "object" && !Array.isArray(data.detailedOutline)
+        ? [data.detailedOutline.core, data.detailedOutline.opening, data.detailedOutline.hook].filter(Boolean).join(" ")
+        : "";
+      return compactRagText([
+        data.title,
+        data.role,
+        data.relation,
+        data.actual,
+        data.next,
+        data.outline,
+        detail,
+        data.memorySummary,
+        data.endingSnapshot,
+        data.nextChapterBridge,
+        data.previousEnding,
+        data.previousBridge,
+        data.currentNeed,
+        data.digest,
+        data.goal,
+        Array.isArray(data.profiles) ? data.profiles.map((item) => `${item.name || ""}:${item.rule || ""}`).join("；") : "",
+      ].filter(Boolean).join("；"), 620);
+    }
+  } catch {
+    // Plain memory rows are fine.
+  }
+  return compactRagText(raw, 620);
+}
+
+function scoreRagRow(row, terms, chapterId) {
+  const content = readableRagContent(row);
+  if (!content) return 0;
+  const lower = content.toLowerCase();
+  let overlap = 0;
+  for (const term of terms) {
+    if (lower.includes(term)) overlap += Math.min(8, Math.max(2, term.length));
+  }
+  const distance = chapterDistanceFromRef(row.ref, chapterId);
+  let base = 0;
+  if (row.kind === "continuity") base += 36;
+  if (row.kind === "chapter") base += distance <= 1 ? 34 : distance <= 3 ? 22 : distance <= 8 ? 10 : 0;
+  if (row.kind === "outline") base += distance === 0 ? 28 : distance <= 5 ? 12 : 0;
+  if (row.kind === "character") base += 16;
+  if (row.kind === "style") base += 14;
+  if (row.kind === "generation") base += 10;
+  return base + overlap;
+}
+
+function buildRagAugmentedPrompt({ projectId = "", chapterId = 0, prompt = "" } = {}) {
+  const id = String(projectId || "").trim();
+  if (!id) return { prompt, meta: { used: false, hits: 0, refs: [] } };
+  const terms = ragTerms(`${chapterId} ${prompt}`);
+  const rows = db
+    .prepare("SELECT project_id, kind, ref, content, created_at FROM memories WHERE project_id = ?")
+    .all(id)
+    .map((row) => ({
+      ...row,
+      contentText: readableRagContent(row),
+      score: scoreRagRow(row, terms, chapterId),
+    }))
+    .filter((row) => row.score >= 18 && row.contentText)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 12);
+
+  if (!rows.length) return { prompt, meta: { used: false, hits: 0, refs: [] } };
+
+  const context = rows
+    .map((row, index) => `${index + 1}. [${row.kind}/${row.ref}] ${row.contentText}`)
+    .join("\n");
+  return {
+    prompt: [
+      "【RAG检索记忆】",
+      "以下内容来自本地项目记忆库，只能用于保持设定、连续性、角色状态和文风，不要照抄，不要在正文里输出“RAG/检索/记忆库”等字样。",
+      context,
+      "",
+      "【生成请求】",
+      prompt,
+    ].join("\n"),
+    meta: {
+      used: true,
+      hits: rows.length,
+      refs: rows.map((row) => `${row.kind}/${row.ref}`),
+    },
+  };
+}
+
 function persistMemory(state) {
   const now = new Date().toISOString();
   const rows = memoryRowsFromState(state);
@@ -972,16 +1100,22 @@ async function handleApi(req, res) {
 
     const startedAt = Date.now();
     try {
+      const ragPrompt = buildRagAugmentedPrompt({
+        projectId: payload.projectId,
+        chapterId: payload.chapterId,
+        prompt: String(payload.prompt),
+      });
       const result = await callModel({
         state,
         task: payload.task || "章节正文",
-        prompt: String(payload.prompt),
+        prompt: ragPrompt.prompt,
         targetWords: Number(payload.targetWords || 2200),
       });
       if (!result.text) throw new Error("模型返回为空");
       sendJson(res, 200, {
         ok: true,
         text: result.text,
+        rag: ragPrompt.meta,
         usage: result.usage,
         provider: result.provider.name,
         providerId: result.provider.id,

@@ -360,8 +360,18 @@ function generationWordRules(targetWords = 2200) {
   const band = generationWordBand(targetWords);
   return [
     `硬性字数：正文必须控制在 2200-3000 字之间，优先落在 ${band.preferredMin}-${band.preferredMax} 字。`,
-    `本章目标约 ${band.target} 字；若不足继续补现场动作、对话交锋、结果反馈和章末钩子；若超过 3000 字先收束。`,
-    `按本章细纲分场景扩写，场景字数总和必须覆盖 ${band.target} 字，不允许 800-1200 字就收尾。`,
+    `本章目标约 ${band.target} 字；若不足优先补人物的顾虑、欲望、误判、选择、对话交锋、结果反馈和章末钩子；若超过 3000 字先收束。`,
+    `按本章细纲分场景扩写，场景字数总和必须覆盖 ${band.target} 字，不允许 800-1200 字就收尾，也不允许靠房间物品、环境清单凑字数。`,
+  ];
+}
+
+function characterDepthRules() {
+  return [
+    "人物生动优先：每个重要场景都写清角色此刻想要什么、怕什么、误判了什么、最后做了什么选择。",
+    "心理活动要有方向：写欲望、顾虑、底线、算计和羞耻感，不写“复杂情绪、心中涌起、说不清道不明”这类标签。",
+    "场景描写限量：地点和物品只保留会改变人物选择、暴露处境或推动冲突的 1-2 个细节，禁止连续罗列床、凳、窗户、墙纸、报纸等物品清单。",
+    "补字数不要补摆设：宁可多写一次迟疑、试探、反悔、嘴硬、让步和代价，也不要用静态陈设填充段落。",
+    "每段落点尽量落在人：动作、台词、心理选择、关系变化或后果，物件只能服务这些变化。",
   ];
 }
 
@@ -598,13 +608,14 @@ function buildChapterGenerationContract(project, chapter) {
     `正文目标 ${band.target} 字，合格区间 ${band.min}-${band.max} 字。`,
     "只输出小说正文，不输出粗纲、细纲、写法说明、规则复述或分析文字。",
     "开场 300 字内必须进入麻烦，中段至少 2 次转折，结尾留下下一章压力。",
+    ...characterDepthRules(),
     continuity.previousChapterTitle
       ? `连续性：必须承接上一章《${continuity.previousChapterTitle}》的尾声，不能把前文当成没发生。`
       : "连续性：如果没有上一章，也要先建立清晰起点，再推进本章事件。",
     continuity.previousEnding ? `开篇落点：第一场必须处理“${continuity.previousEnding}”留下的结果、人物位置或未解决压力。` : "",
     "前 300 字必须先接住上一章结果、余波或人物状态，再写本章新推进。",
     "禁止把每章写成独立短篇；不要跳过上一章结尾直接开新事件。",
-    "每段都落在人物动作、对话、现场物件或结果变化上，少解释，少心理总结。",
+    "每段都落在人物动作、对话、心理选择、关系变化或结果变化上，少解释，少静态陈设。",
     ...(goldFingerRules.length ? [`金手指必须有操作感：${goldFingerRules.join("；")}`] : []),
   ].filter(Boolean);
 }
@@ -622,6 +633,7 @@ function combinedGenerationRules(project) {
     : [];
   const rules = [
     ...wordRules,
+    ...characterDepthRules(),
     ...fusionRules,
     ...tagRules,
     ...learned.filter((rule) => !wordRules.includes(rule)),
@@ -864,6 +876,10 @@ function buildChapterGenerationPrompt(project, chapter, detail) {
     "【文风规则】",
     ...(combinedGenerationRules(project).length ? combinedGenerationRules(project) : ["番茄小白文，句子直给，少作者腔。"]),
     "",
+    "【人物鲜活规则】",
+    "不要写成“地点+物品清单”。出租屋、片场、后台、电话亭等场景只保留能压住人物处境的 1-2 个细节，重点写他为什么不敢退、为什么还要赌、他下一步怎么选。",
+    "心理不是抒情，是行动前的拉扯：怕丢脸、怕没钱、怕错过机会、想翻身、想保住尊严，这些必须推动下一句动作或台词。",
+    "",
     "【金手指设定】",
     ...(goldFingerRules.length ? goldFingerRules : ["预言系统：短期事件预知，必须有消耗、代价和结果回收。"]),
   ].filter(Boolean).join("\n");
@@ -903,7 +919,8 @@ function llmUsageText(meta = {}, chapter = null) {
   const auto = meta.autoSelectedModel && meta.requestedModel && meta.requestedModel !== meta.model
     ? ` · 自动从 ${meta.requestedModel} 切到可用模型`
     : "";
-  return `${meta.provider || "-"} / ${meta.model || "-"}${meta.endpoint ? ` · ${meta.endpoint}` : ""}${auto} · input ${usage.inputTokens || 0} · output ${usage.outputTokens || 0} · total ${total || 0}`;
+  const rag = meta.rag?.used ? ` · RAG ${meta.rag.hits || 0} 条` : "";
+  return `${meta.provider || "-"} / ${meta.model || "-"}${meta.endpoint ? ` · ${meta.endpoint}` : ""}${auto}${rag} · input ${usage.inputTokens || 0} · output ${usage.outputTokens || 0} · total ${total || 0}`;
 }
 
 function recordLlmUsage(project, chapter, result) {
@@ -924,6 +941,7 @@ function recordLlmUsage(project, chapter, result) {
     temperature: result.temperature,
     endpoint: result.endpoint,
     fallbackFrom: result.fallbackFrom,
+    rag: result.rag || null,
     usage: { inputTokens, outputTokens, totalTokens },
     latencyMs: result.latencyMs,
     requestId: result.requestId,
@@ -3229,7 +3247,10 @@ function buildChapterFixPlan(chapter) {
     plan.push(`把伏笔数值直接落地，例如“反噬85%→65%（延迟3月）”要在正文里出现。`);
   }
   if (styleMetrics.summaryHits > 0 || (chapter?.scoreDetail?.style || 0) < 80) {
-    plan.push(`减少“仿佛/好像/不禁”类解释句，改成动作、物件、台词和结果。`);
+    plan.push(`减少“仿佛/好像/不禁”类解释句，改成欲望、顾虑、动作、台词和结果。`);
+  }
+  if (styleMetrics.inventoryPileHits > 0 || issues.some((issue) => issue.type === "AI味")) {
+    plan.push("删掉场景物品清单，只留 1-2 个会改变人物选择的细节，把篇幅让给人物心理拉扯和决定。");
   }
   if (issues.some((issue) => issue.type === "角色")) {
     plan.push("把计划角色补一个动作或一句台词，避免只写结果不写出场。");
@@ -3335,6 +3356,9 @@ function buildProjectAudit(project) {
   const shortDrafts = chapters.filter((chapter) => chapter.manuscript && chapterWordCount(chapter.manuscript) < 2200).slice(0, 4);
   const overlongDrafts = chapters.filter((chapter) => chapter.manuscript && chapterWordCount(chapter.manuscript) > 3000).slice(0, 4);
   const metaLeak = chapters.filter((chapter) => /细纲对应|写法上|粗纲节点|本章定位|剧情目标|冲突设计/.test(chapter.manuscript || "")).slice(0, 4);
+  const inventoryPileChapters = chapters
+    .filter((chapter) => chapter.manuscript && sceneInventoryPileCount(chapter.manuscript) > 0)
+    .slice(0, 4);
   const forbiddenHitChapters = chapters
     .map((chapter) => ({
       chapter,
@@ -3357,9 +3381,12 @@ function buildProjectAudit(project) {
   if (metaLeak.length) {
     rows.push({ type: "污染", pos: metaLeak.map((chapter) => `第${chapter.id}章`).join("、"), issue: "正文混入工作台提示或细纲标签。", level: "高", fix: "重新生成或清理正文，只保留故事内容。" });
   }
+  if (inventoryPileChapters.length) {
+    rows.push({ type: "AI味", pos: inventoryPileChapters.map((chapter) => `第${chapter.id}章`).join("、"), issue: "存在场景物品清单式描写，人物心理和选择不足。", level: "中", fix: "删掉静态陈设堆叠，补人物的欲望、顾虑、误判和下一步动作。" });
+  }
   if (forbiddenHitChapters.length) {
     const first = forbiddenHitChapters[0];
-    rows.push({ type: "禁词", pos: `第${first.chapter.id}章等`, issue: `命中高频模板词：${first.hits.join("、")}。`, level: "中", fix: "改成具体动作、物件、通告、电话、监视器或现场反馈。" });
+    rows.push({ type: "禁词", pos: `第${first.chapter.id}章等`, issue: `命中高频模板词：${first.hits.join("、")}。`, level: "中", fix: "改成具体欲望、动作、台词、通告、电话或现场反馈。" });
   }
   if (roleRisk.length) {
     rows.push({ type: "角色", pos: roleRisk.map((role) => role.name).join("、"), issue: "角色表存在中高缺席风险。", level: "中", fix: "在后续章节补明确出场动作，或调整计划出场章。" });
@@ -3385,7 +3412,7 @@ function buildProjectAudit(project) {
     [reviewChapters.length ? "warn" : "ok", "审查队列", "章节审查", reviewChapters.length ? `${reviewChapters.length} 章待处理` : "无待审章节"],
     [doneChapters.length ? "ok" : "warn", "完成队列", "完成功能", doneChapters.length ? `${doneChapters.length} 章已完成` : "暂无完成章"],
     [roleRisk.length ? "warn" : "ok", "角色表", "缺席风险", roleRisk.length ? `${roleRisk.length} 个中高风险角色` : "角色风险稳定"],
-    [forbiddenHitChapters.length ? "warn" : "ok", "正文", "禁词扫描", forbiddenHitChapters.length ? "发现模板词" : "未发现主要模板词"],
+    [forbiddenHitChapters.length || inventoryPileChapters.length ? "warn" : "ok", "正文", "AI味扫描", forbiddenHitChapters.length || inventoryPileChapters.length ? "发现模板词或物品堆叠" : "未发现主要模板词"],
   ];
 
   return { rows, timeline };
@@ -3948,6 +3975,16 @@ function scoreHookText(text = "") {
   return clampScore(score, 40, 96);
 }
 
+function sceneInventoryPileCount(text = "") {
+  const objectWords = ["房间", "筒子楼", "窗户", "垃圾站", "折叠床", "塑料凳", "烧水壶", "墙上", "报纸", "桌子", "椅子", "柜子", "纸箱", "床", "凳", "壶", "门", "窗"];
+  return draftParagraphs(text).filter((paragraph) => {
+    const commaCount = (paragraph.match(/[、，,]/g) || []).length;
+    const objectHits = countKeywordHits(paragraph, objectWords);
+    const measureHits = (paragraph.match(/[一二两三四五六七八九十\d]+[张个间把只扇面份本台条]/g) || []).length;
+    return objectHits >= 4 && (commaCount >= 3 || measureHits >= 3);
+  }).length;
+}
+
 function draftStyleMetrics(text = "") {
   const paragraphs = draftParagraphs(text);
   const sentences = draftSentences(text);
@@ -3964,7 +4001,9 @@ function draftStyleMetrics(text = "") {
     avgParagraph: Math.round(paragraphLengths.reduce((sum, item) => sum + item, 0) / Math.max(paragraphLengths.length, 1)),
     dialogueRatio: Math.round((dialogueChars / Math.max(wordCount, 1)) * 100),
     actionHits: countKeywordHits(text, ["推", "拿", "递", "看", "走", "站", "坐", "敲", "拍", "打开", "关上", "挂断", "按住", "拉开", "转身", "抬头", "低头", "点头", "摇头", "停下", "退后", "靠近", "盯着", "翻开", "放下", "问", "说", "笑"]),
-    summaryHits: countKeywordHits(text, ["意识到", "明白", "觉得", "心里", "心中", "复杂", "情绪", "仿佛", "似乎", "不禁", "忍不住", "莫名"]),
+    summaryHits: countKeywordHits(text, ["复杂", "情绪", "仿佛", "似乎", "不禁", "忍不住", "莫名", "说不清道不明", "心中涌起", "眼神中闪过"]),
+    innerChoiceHits: countKeywordHits(text, ["怕", "想", "不敢", "舍不得", "后悔", "赌", "忍", "认输", "翻身", "尊严", "底线", "顾虑", "算计", "退路", "机会"]),
+    inventoryPileHits: sceneInventoryPileCount(text),
   };
 }
 
@@ -4004,6 +4043,9 @@ function auditChapterDraft(project, chapter) {
   if (forbiddenHits.length) {
     issues.push({ type: "禁词", level: "中", text: `命中模板词：${forbiddenHits.join("、")}。`, fix: "改成具体动作、物件、通告或现场反馈。" });
   }
+  if (styleMetrics.inventoryPileHits) {
+    issues.push({ type: "AI味", level: "中", text: `发现 ${styleMetrics.inventoryPileHits} 段场景物品清单式描写。`, fix: "删掉多数静态物品，只保留会影响人物选择的细节，补角色的欲望、顾虑和下一步动作。" });
+  }
   if (explicitScaleRisk || underageRomanceRisk) {
     issues.push({ type: "尺度", level: "高", text: "存在平台尺度或未成年感情风险。", fix: "只保留成年人自愿、留白和关系后果；未成年只写事业守护。" });
   }
@@ -4038,6 +4080,7 @@ function auditChapterDraft(project, chapter) {
       - forbiddenHits.length * 4
       - metaHits.length * 14
       - Math.min(14, styleMetrics.summaryHits * 2)
+      - Math.min(12, styleMetrics.inventoryPileHits * 6)
       - Math.min(10, sentenceGap)
       - Math.min(8, dialogueGap / 2)
       + Math.min(8, actionDensity),
@@ -4075,7 +4118,7 @@ function auditChapterDraft(project, chapter) {
           ? `字数不足：${wordCount}（下限 ${hardMin}）`
           : `字数超限：${wordCount}（上限 ${hardMax}）`,
       `细纲覆盖：${outlineCoverage.hit}/${outlineCoverage.total}；角色覆盖：${Math.round(roleCoverage * 100)}%；伏笔覆盖：${Math.round(clueCoverage * 100)}%。`,
-      `文风指标：均句 ${styleMetrics.avgSentence} 字，对话 ${styleMetrics.dialogueRatio}%，动作词 ${styleMetrics.actionHits}，解释词 ${styleMetrics.summaryHits}。`,
+      `文风指标：均句 ${styleMetrics.avgSentence} 字，对话 ${styleMetrics.dialogueRatio}%，动作词 ${styleMetrics.actionHits}，心理选择词 ${styleMetrics.innerChoiceHits}，解释词 ${styleMetrics.summaryHits}，物品堆叠 ${styleMetrics.inventoryPileHits} 段。`,
       issues.length ? `审查发现 ${issues.length} 项问题，高风险 ${highIssues} 项。` : "审查通过：未发现明显结构、禁词、尺度和伏笔问题。",
       midIssues ? `中风险 ${midIssues} 项，完成前建议修一遍。` : "中风险 0 项。",
     ],
