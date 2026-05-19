@@ -485,6 +485,10 @@ h3 {
   grid-column: span 5;
 }
 
+.span-6 {
+  grid-column: span 6;
+}
+
 .span-7 {
   grid-column: span 7;
 }
@@ -1914,6 +1918,85 @@ select:focus {
   grid-template-columns: minmax(520px, 1fr);
 }
 
+.production-metrics {
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+}
+
+.production-grid {
+  display: grid;
+  grid-template-columns: repeat(12, minmax(0, 1fr));
+  gap: 14px;
+  margin-top: 14px;
+}
+
+.production-search-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 92px 130px;
+  gap: 8px;
+  padding: 14px;
+  border-bottom: 1px solid var(--line);
+}
+
+.production-search-row input,
+.production-search-row select {
+  width: 100%;
+}
+
+.production-result-list,
+.production-version-list,
+.production-cost-list {
+  display: grid;
+  align-content: start;
+  gap: 8px;
+  height: clamp(180px, 32vh, 360px);
+  overflow: auto;
+  padding: 12px 14px 14px;
+}
+
+.production-result-item,
+.production-version-item,
+.production-cost-item {
+  display: grid;
+  gap: 6px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+}
+
+.production-result-item header,
+.production-version-item header,
+.production-cost-item header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.production-result-item strong,
+.production-version-item strong,
+.production-cost-item strong {
+  font-size: 13px;
+}
+
+.production-result-item p,
+.production-version-item p,
+.production-cost-item p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.production-result-item em,
+.production-version-item em,
+.production-cost-item em {
+  color: var(--muted);
+  font-size: 12px;
+  font-style: normal;
+}
+
 .provider-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -2209,5 +2292,13 @@ select:focus {
 
   .writer-shell {
     grid-template-columns: 250px minmax(440px, 1fr) 310px;
+  }
+
+  .production-metrics {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .production-grid .span-6 {
+    grid-column: 1 / -1;
   }
 }

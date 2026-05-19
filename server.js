@@ -39,6 +39,141 @@ db.exec(`
 
   CREATE INDEX IF NOT EXISTS idx_state_backups_workspace_created
     ON state_backups(workspace, created_at);
+
+  CREATE TABLE IF NOT EXISTS vector_index (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id TEXT NOT NULL,
+    source_kind TEXT NOT NULL,
+    source_ref TEXT NOT NULL,
+    content TEXT NOT NULL,
+    vector_json TEXT NOT NULL,
+    keywords_json TEXT NOT NULL,
+    metadata_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(project_id, source_kind, source_ref)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_vector_index_project_kind
+    ON vector_index(project_id, source_kind);
+
+  CREATE TABLE IF NOT EXISTS chapter_facts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id TEXT NOT NULL,
+    chapter_id INTEGER NOT NULL,
+    fact_type TEXT NOT NULL,
+    subject TEXT NOT NULL,
+    predicate TEXT NOT NULL,
+    object TEXT NOT NULL,
+    evidence TEXT NOT NULL,
+    confidence REAL NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_chapter_facts_project_chapter
+    ON chapter_facts(project_id, chapter_id);
+
+  CREATE TABLE IF NOT EXISTS character_states (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id TEXT NOT NULL,
+    character_name TEXT NOT NULL,
+    chapter_id INTEGER NOT NULL,
+    status TEXT NOT NULL,
+    location TEXT NOT NULL,
+    goal TEXT NOT NULL,
+    relation_snapshot TEXT NOT NULL,
+    power_state TEXT NOT NULL,
+    evidence TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(project_id, character_name, chapter_id)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_character_states_project_character
+    ON character_states(project_id, character_name);
+
+  CREATE TABLE IF NOT EXISTS plot_versions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id TEXT NOT NULL,
+    version_id TEXT NOT NULL UNIQUE,
+    label TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    state_json TEXT NOT NULL,
+    created_at TEXT NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_plot_versions_project_created
+    ON plot_versions(project_id, created_at);
+
+  CREATE TABLE IF NOT EXISTS regression_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id TEXT NOT NULL,
+    run_id TEXT NOT NULL UNIQUE,
+    status TEXT NOT NULL,
+    score INTEGER NOT NULL,
+    issues_json TEXT NOT NULL,
+    created_at TEXT NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_regression_runs_project_created
+    ON regression_runs(project_id, created_at);
+
+  CREATE TABLE IF NOT EXISTS prompt_versions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id TEXT NOT NULL,
+    prompt_id TEXT NOT NULL UNIQUE,
+    task TEXT NOT NULL,
+    label TEXT NOT NULL,
+    prompt_text TEXT NOT NULL,
+    metrics_json TEXT NOT NULL,
+    active INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_prompt_versions_project_task
+    ON prompt_versions(project_id, task);
+
+  CREATE TABLE IF NOT EXISTS prompt_eval_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id TEXT NOT NULL,
+    eval_id TEXT NOT NULL UNIQUE,
+    prompt_id TEXT NOT NULL,
+    score INTEGER NOT NULL,
+    cases_json TEXT NOT NULL,
+    created_at TEXT NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_prompt_eval_project_created
+    ON prompt_eval_runs(project_id, created_at);
+
+  CREATE TABLE IF NOT EXISTS cost_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id TEXT NOT NULL,
+    chapter_id INTEGER NOT NULL,
+    event_key TEXT NOT NULL UNIQUE,
+    provider TEXT NOT NULL,
+    model TEXT NOT NULL,
+    task TEXT NOT NULL,
+    input_tokens INTEGER NOT NULL,
+    output_tokens INTEGER NOT NULL,
+    total_tokens INTEGER NOT NULL,
+    estimated_cost REAL NOT NULL,
+    created_at TEXT NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_cost_events_project_created
+    ON cost_events(project_id, created_at);
+
+  CREATE TABLE IF NOT EXISTS editor_agent_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id TEXT NOT NULL,
+    chapter_id INTEGER NOT NULL,
+    run_id TEXT NOT NULL UNIQUE,
+    rounds_json TEXT NOT NULL,
+    status TEXT NOT NULL,
+    created_at TEXT NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_editor_agent_project_chapter
+    ON editor_agent_runs(project_id, chapter_id);
 `);
 
 const mimeTypes = {
@@ -948,6 +1083,618 @@ function buildRagAugmentedPrompt({ projectId = "", chapterId = 0, prompt = "" } 
   };
 }
 
+function hashString(value = "") {
+  let hash = 2166136261;
+  const text = String(value || "");
+  for (let index = 0; index < text.length; index += 1) {
+    hash ^= text.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return hash >>> 0;
+}
+
+function stableId(prefix = "id") {
+  return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function buildHashVector(text = "", dimensions = 96) {
+  const vector = Array.from({ length: dimensions }, () => 0);
+  for (const term of ragTerms(text)) {
+    const hash = hashString(term);
+    const index = hash % dimensions;
+    const sign = hash & 1 ? 1 : -1;
+    vector[index] += sign * Math.min(3, Math.max(1, term.length / 2));
+  }
+  const norm = Math.sqrt(vector.reduce((sum, value) => sum + value * value, 0)) || 1;
+  return vector.map((value) => Number((value / norm).toFixed(6)));
+}
+
+function cosineSimilarity(a = [], b = []) {
+  const length = Math.min(a.length, b.length);
+  let score = 0;
+  for (let index = 0; index < length; index += 1) score += Number(a[index] || 0) * Number(b[index] || 0);
+  return score;
+}
+
+function vectorSource(projectId, sourceKind, sourceRef, content, metadata = {}) {
+  return {
+    projectId,
+    sourceKind,
+    sourceRef: String(sourceRef || "-"),
+    content: compactRagText(content, 1400),
+    metadata,
+  };
+}
+
+function extractChapterFacts(project = {}) {
+  const rows = [];
+  const now = new Date().toISOString();
+  for (const chapter of project.chapters || []) {
+    const chapterId = Number(chapter.id || 0);
+    if (!chapterId) continue;
+    const text = String(chapter.manuscript || "");
+    const detail = chapter.detailedOutline && typeof chapter.detailedOutline === "object" && !Array.isArray(chapter.detailedOutline)
+      ? chapter.detailedOutline
+      : {};
+    const summary = compactRagText([
+      chapter.title,
+      chapter.outline,
+      detail.core,
+      detail.opening,
+      chapter.memorySummary,
+      chapter.endingSnapshot,
+    ].filter(Boolean).join("；"), 520);
+    if (summary) {
+      rows.push({
+        projectId: project.id,
+        chapterId,
+        factType: "chapter_summary",
+        subject: `第${chapterId}章`,
+        predicate: "发生",
+        object: summary,
+        evidence: compactRagText(text || summary, 520),
+        confidence: text ? 0.86 : 0.72,
+        updatedAt: now,
+      });
+    }
+    for (const role of chapter.roles || []) {
+      const name = String(role || "").trim();
+      if (!name) continue;
+      rows.push({
+        projectId: project.id,
+        chapterId,
+        factType: "character_appearance",
+        subject: name,
+        predicate: text.includes(name) ? "实际出场" : "计划出场",
+        object: chapter.title || `第${chapterId}章`,
+        evidence: compactRagText(text.includes(name) ? text.slice(Math.max(0, text.indexOf(name) - 120), text.indexOf(name) + 220) : chapter.outline || chapter.title, 360),
+        confidence: text.includes(name) ? 0.9 : 0.64,
+        updatedAt: now,
+      });
+    }
+    for (const clue of chapter.clues || []) {
+      if (!clue) continue;
+      rows.push({
+        projectId: project.id,
+        chapterId,
+        factType: "clue",
+        subject: "伏笔",
+        predicate: text.includes(clue) ? "已落正文" : "计划埋设",
+        object: String(clue),
+        evidence: compactRagText(chapter.outline || detail.hook || text, 360),
+        confidence: text.includes(clue) ? 0.88 : 0.66,
+        updatedAt: now,
+      });
+    }
+    if (chapter.llmMeta?.model) {
+      rows.push({
+        projectId: project.id,
+        chapterId,
+        factType: "generation_model",
+        subject: `第${chapterId}章`,
+        predicate: "生成模型",
+        object: `${chapter.llmMeta.provider || ""}/${chapter.llmMeta.model || ""}`,
+        evidence: JSON.stringify(chapter.llmMeta).slice(0, 520),
+        confidence: 0.95,
+        updatedAt: now,
+      });
+    }
+  }
+  return rows;
+}
+
+function characterShortNameServer(name = "") {
+  const text = String(name || "").trim();
+  return text.split(/[／/、\s·｜|()（）-]/).filter(Boolean)[0] || text;
+}
+
+function extractCharacterStates(project = {}) {
+  const rows = [];
+  const now = new Date().toISOString();
+  const chapters = project.chapters || [];
+  for (const character of project.characters || []) {
+    const name = String(character.name || "").trim();
+    if (!name) continue;
+    const short = characterShortNameServer(name);
+    const related = chapters
+      .filter((chapter) => (chapter.roles || []).some((role) => characterShortNameServer(role) === short) || String(chapter.manuscript || "").includes(short))
+      .slice(-5);
+    const recent = related.at(-1) || {};
+    rows.push({
+      projectId: project.id,
+      characterName: name,
+      chapterId: Number(recent.id || character.first || 0) || 0,
+      status: character.risk ? `缺席风险：${character.risk}` : "持续跟踪",
+      location: recent.title || character.plan || "待定位",
+      goal: character.next || character.plan || "按角色线推进",
+      relationSnapshot: character.relation || character.role || "",
+      powerState: /星运|预言|赋能|强化|金手指/.test(`${character.role || ""}${character.relation || ""}${character.next || ""}`) ? "受金手指线影响" : "",
+      evidence: compactRagText([character.actual, character.next, recent.memorySummary, recent.outline].filter(Boolean).join("；"), 520),
+      updatedAt: now,
+    });
+  }
+  return rows;
+}
+
+function ensurePromptVersions(project = {}) {
+  const now = new Date().toISOString();
+  const rules = [
+    ...(project.generationRules || []),
+    ...(project.learnedRules || []),
+    ...(project.styleTags || []).filter((tag) => tag.enabled).map((tag) => tag.name),
+    project.styleFusionGoal || "",
+  ].filter(Boolean).join("\n");
+  const promptText = compactRagText(`章节正文生成规则\n${rules || "按章节细纲、连续性记忆、人物状态和字数约束生成正文。"}`, 4000);
+  const promptId = `prompt-${project.id}-${hashString(promptText).toString(16)}`;
+  db.prepare(`
+    INSERT OR IGNORE INTO prompt_versions (project_id, prompt_id, task, label, prompt_text, metrics_json, active, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    project.id,
+    promptId,
+    "章节正文",
+    "自动同步：章节正文生成",
+    promptText,
+    JSON.stringify({ source: "project-rules", ruleCount: (project.generationRules || []).length + (project.learnedRules || []).length }),
+    1,
+    now,
+  );
+  db.prepare("UPDATE prompt_versions SET active = CASE WHEN prompt_id = ? THEN 1 ELSE 0 END WHERE project_id = ? AND task = ?")
+    .run(promptId, project.id, "章节正文");
+  return promptId;
+}
+
+function estimateModelCost(provider = "", model = "", inputTokens = 0, outputTokens = 0) {
+  const id = `${provider} ${model}`.toLowerCase();
+  let inputPerMillion = 0.4;
+  let outputPerMillion = 1.2;
+  if (/gpt|openai/.test(id)) {
+    inputPerMillion = /mini|nano/.test(id) ? 0.15 : 2.5;
+    outputPerMillion = /mini|nano/.test(id) ? 0.6 : 10;
+  } else if (/claude|anthropic/.test(id)) {
+    inputPerMillion = /haiku/.test(id) ? 0.8 : 3;
+    outputPerMillion = /haiku/.test(id) ? 4 : 15;
+  } else if (/gemini/.test(id)) {
+    inputPerMillion = /flash/.test(id) ? 0.35 : 1.25;
+    outputPerMillion = /flash/.test(id) ? 1.05 : 5;
+  } else if (/deepseek/.test(id)) {
+    inputPerMillion = 0.3;
+    outputPerMillion = 1.2;
+  }
+  return Number(((Number(inputTokens || 0) / 1_000_000) * inputPerMillion + (Number(outputTokens || 0) / 1_000_000) * outputPerMillion).toFixed(6));
+}
+
+function recordCostEvent({ projectId = "", chapterId = 0, provider = "", model = "", task = "", usage = {}, createdAt = "" } = {}) {
+  const inputTokens = Number(usage.inputTokens || 0);
+  const outputTokens = Number(usage.outputTokens || 0);
+  const totalTokens = Number(usage.totalTokens || inputTokens + outputTokens || 0);
+  const timestamp = createdAt || new Date().toISOString();
+  const eventKey = `${projectId}:${chapterId}:${task}:${provider}:${model}:${timestamp}:${totalTokens}`;
+  const estimatedCost = estimateModelCost(provider, model, inputTokens, outputTokens);
+  db.prepare(`
+    INSERT OR IGNORE INTO cost_events (project_id, chapter_id, event_key, provider, model, task, input_tokens, output_tokens, total_tokens, estimated_cost, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    String(projectId || "default"),
+    Number(chapterId || 0),
+    eventKey,
+    String(provider || ""),
+    String(model || ""),
+    String(task || ""),
+    inputTokens,
+    outputTokens,
+    totalTokens,
+    estimatedCost,
+    timestamp,
+  );
+  return { inputTokens, outputTokens, totalTokens, estimatedCost, eventKey };
+}
+
+function syncCostEventsFromProject(project = {}) {
+  for (const log of project.llmCallLogs || []) {
+    recordCostEvent({
+      projectId: project.id,
+      chapterId: Number(log.chapter || 0),
+      provider: log.provider || "",
+      model: log.model || "",
+      task: log.task || "章节正文",
+      usage: log.usage || {},
+      createdAt: log.calledAt || log.createdAt || "",
+    });
+  }
+}
+
+function rebuildVectorIndex(project, facts = [], states = []) {
+  const now = new Date().toISOString();
+  const projectId = String(project.id || "");
+  if (!projectId) return 0;
+  const sources = [];
+  for (const row of memoryRowsFromState({ projects: [project] })) {
+    sources.push(vectorSource(projectId, `memory:${row.kind}`, row.ref, row.content, { kind: row.kind }));
+  }
+  for (const fact of facts) {
+    sources.push(vectorSource(projectId, `fact:${fact.factType}`, `${fact.chapterId}-${fact.subject}-${fact.predicate}`, `${fact.subject}${fact.predicate}${fact.object}。证据：${fact.evidence}`, { chapterId: fact.chapterId, confidence: fact.confidence }));
+  }
+  for (const state of states) {
+    sources.push(vectorSource(projectId, "character_state", `${state.characterName}-${state.chapterId}`, `${state.characterName}：${state.status}；位置：${state.location}；目标：${state.goal}；关系：${state.relationSnapshot}；${state.evidence}`, { chapterId: state.chapterId }));
+  }
+  const prompts = db.prepare("SELECT prompt_id, task, label, prompt_text FROM prompt_versions WHERE project_id = ? ORDER BY id DESC LIMIT 20").all(projectId);
+  for (const prompt of prompts) {
+    sources.push(vectorSource(projectId, "prompt_version", prompt.prompt_id, `${prompt.task} ${prompt.label} ${prompt.prompt_text}`, { task: prompt.task }));
+  }
+
+  db.prepare("DELETE FROM vector_index WHERE project_id = ?").run(projectId);
+  const insert = db.prepare(`
+    INSERT OR REPLACE INTO vector_index (project_id, source_kind, source_ref, content, vector_json, keywords_json, metadata_json, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+  for (const source of sources) {
+    if (!source.content) continue;
+    insert.run(
+      source.projectId,
+      source.sourceKind,
+      source.sourceRef,
+      source.content,
+      JSON.stringify(buildHashVector(source.content)),
+      JSON.stringify(ragTerms(source.content).slice(0, 80)),
+      JSON.stringify(source.metadata || {}),
+      now,
+    );
+  }
+  return sources.length;
+}
+
+function createPlotVersion(project = {}, label = "自动基线") {
+  const now = new Date().toISOString();
+  const summary = compactRagText([
+    project.title,
+    `当前章节：${project.currentChapter || 0}`,
+    `目录：${project.chapterPlanCount || project.chapters?.length || 0}`,
+    `正文：${project.words || 0}字`,
+    project.storyMemory?.digest || "",
+  ].filter(Boolean).join("；"), 1000);
+  const stateJson = JSON.stringify({
+    title: project.title,
+    currentChapter: project.currentChapter || 0,
+    outlineRows: project.outlineRows || [],
+    characters: project.characters || [],
+    chapters: (project.chapters || []).map((chapter) => ({
+      id: chapter.id,
+      title: chapter.title,
+      status: chapter.status,
+      outline: chapter.outline,
+      detailedOutline: chapter.detailedOutline,
+      memorySummary: chapter.memorySummary || "",
+      endingSnapshot: chapter.endingSnapshot || "",
+      score: chapter.score || null,
+    })),
+  });
+  const versionId = `plot-${project.id}-${hashString(`${summary}:${stateJson}`).toString(16)}-${Date.now().toString(36)}`;
+  db.prepare(`
+    INSERT OR IGNORE INTO plot_versions (project_id, version_id, label, summary, state_json, created_at)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `).run(project.id, versionId, label, summary, stateJson, now);
+  return { versionId, label, summary, createdAt: now };
+}
+
+function ensureBaselinePlotVersion(project = {}) {
+  const existing = db.prepare("SELECT id FROM plot_versions WHERE project_id = ? LIMIT 1").get(project.id);
+  if (!existing) createPlotVersion(project, "自动基线");
+}
+
+function syncProductionFromState(state, { projectId = "" } = {}) {
+  if (!state?.projects?.length) return { projects: 0, vectors: 0, facts: 0, states: 0 };
+  const targetProjects = projectId
+    ? state.projects.filter((project) => project.id === projectId)
+    : state.projects;
+  let vectorCount = 0;
+  let factCount = 0;
+  let stateCount = 0;
+  db.exec("BEGIN");
+  try {
+    for (const project of targetProjects) {
+      const facts = extractChapterFacts(project);
+      const states = extractCharacterStates(project);
+      db.prepare("DELETE FROM chapter_facts WHERE project_id = ?").run(project.id);
+      db.prepare("DELETE FROM character_states WHERE project_id = ?").run(project.id);
+      const factInsert = db.prepare(`
+        INSERT INTO chapter_facts (project_id, chapter_id, fact_type, subject, predicate, object, evidence, confidence, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+      for (const fact of facts) {
+        factInsert.run(fact.projectId, fact.chapterId, fact.factType, fact.subject, fact.predicate, fact.object, fact.evidence, fact.confidence, fact.updatedAt);
+      }
+      const stateInsert = db.prepare(`
+        INSERT OR REPLACE INTO character_states (project_id, character_name, chapter_id, status, location, goal, relation_snapshot, power_state, evidence, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+      for (const row of states) {
+        stateInsert.run(row.projectId, row.characterName, row.chapterId, row.status, row.location, row.goal, row.relationSnapshot, row.powerState, row.evidence, row.updatedAt);
+      }
+      ensurePromptVersions(project);
+      ensureBaselinePlotVersion(project);
+      syncCostEventsFromProject(project);
+      vectorCount += rebuildVectorIndex(project, facts, states);
+      factCount += facts.length;
+      stateCount += states.length;
+    }
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+  return { projects: targetProjects.length, vectors: vectorCount, facts: factCount, states: stateCount };
+}
+
+function hybridSearch({ projectId = "", query = "", chapterId = 0, kind = "", limit = 12 } = {}) {
+  const terms = ragTerms(`${chapterId} ${query}`);
+  const queryVector = buildHashVector(query || `${chapterId}`);
+  const rows = kind
+    ? db.prepare("SELECT * FROM vector_index WHERE project_id = ? AND source_kind LIKE ?").all(projectId, `${kind}%`)
+    : db.prepare("SELECT * FROM vector_index WHERE project_id = ?").all(projectId);
+  return rows
+    .map((row) => {
+      let vector = [];
+      let keywords = [];
+      try { vector = JSON.parse(row.vector_json || "[]"); } catch {}
+      try { keywords = JSON.parse(row.keywords_json || "[]"); } catch {}
+      const lower = `${row.content || ""} ${keywords.join(" ")}`.toLowerCase();
+      const keywordScore = terms.reduce((sum, term) => sum + (lower.includes(term) ? Math.min(10, term.length + 2) : 0), 0);
+      const vectorScore = cosineSimilarity(queryVector, vector) * 100;
+      const distance = chapterDistanceFromRef(row.source_ref, chapterId);
+      const chapterBoost = distance === 0 ? 24 : distance <= 2 ? 14 : distance <= 8 ? 6 : 0;
+      const kindBoost = /continuity|character_state|chapter/.test(row.source_kind) ? 8 : 0;
+      const score = keywordScore * 0.52 + vectorScore * 0.34 + chapterBoost + kindBoost;
+      return {
+        sourceKind: row.source_kind,
+        sourceRef: row.source_ref,
+        content: row.content,
+        score: Number(score.toFixed(2)),
+        keywordScore,
+        vectorScore: Number(vectorScore.toFixed(2)),
+        chapterDistance: distance,
+      };
+    })
+    .filter((row) => row.score > 8 || !query)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, Math.min(Number(limit) || 12, 50));
+}
+
+function projectById(state, projectId = "") {
+  return (state?.projects || []).find((project) => project.id === projectId) || (state?.projects || [])[0] || null;
+}
+
+function regressionIssuesForProject(project = {}) {
+  const issues = [];
+  const chapters = project.chapters || [];
+  const vectorCount = db.prepare("SELECT COUNT(*) AS count FROM vector_index WHERE project_id = ?").get(project.id)?.count || 0;
+  const factCount = db.prepare("SELECT COUNT(*) AS count FROM chapter_facts WHERE project_id = ?").get(project.id)?.count || 0;
+  if (vectorCount < Math.min(20, Math.max(5, chapters.length))) {
+    issues.push({ level: "高", type: "RAG", pos: "向量索引", text: `向量片段只有 ${vectorCount} 条，低于当前项目需要。`, fix: "点击“同步生产索引”，确保章节、事实、人物状态已入库。" });
+  }
+  if (factCount < Math.min(20, Math.max(5, chapters.filter((chapter) => chapter.manuscript).length * 2))) {
+    issues.push({ level: "中", type: "事实库", pos: "章节事实", text: `章节事实只有 ${factCount} 条，事实覆盖偏低。`, fix: "生成或保存正文后同步事实库，必要时补角色和伏笔字段。" });
+  }
+  const drafts = chapters.filter((chapter) => chapter.manuscript);
+  for (const chapter of drafts.slice(0, 80)) {
+    const words = String(chapter.manuscript || "").match(/[\u4e00-\u9fa5A-Za-z0-9]/g)?.length || 0;
+    if (words && (words < 2200 || words > 3000)) {
+      issues.push({ level: words < 2200 ? "高" : "中", type: "字数", pos: `第${chapter.id}章`, text: `正文 ${words} 字，不在 2200-3000 区间。`, fix: "重新生成或编辑到目标字数区间。" });
+    }
+    const missingRoles = (chapter.roles || []).filter((role) => role && !String(chapter.manuscript || "").includes(characterShortNameServer(role)));
+    if (missingRoles.length) {
+      issues.push({ level: "中", type: "角色", pos: `第${chapter.id}章`, text: `计划角色未落正文：${missingRoles.slice(0, 3).join("、")}。`, fix: "补出场动作/台词，或调整章节角色计划。" });
+    }
+  }
+  const states = db.prepare("SELECT character_name, COUNT(*) AS count FROM character_states WHERE project_id = ? GROUP BY character_name").all(project.id);
+  for (const character of (project.characters || []).slice(0, 80)) {
+    const match = states.find((row) => row.character_name === character.name);
+    if (!match) {
+      issues.push({ level: "中", type: "状态机", pos: character.name || "角色", text: "人物状态机缺少该角色记录。", fix: "同步生产索引，或在角色表补计划出场和关系进展。" });
+    }
+  }
+  return issues.slice(0, 80);
+}
+
+function runRegression(project = {}) {
+  const issues = regressionIssuesForProject(project);
+  const high = issues.filter((issue) => issue.level === "高").length;
+  const medium = issues.filter((issue) => issue.level === "中").length;
+  const score = Math.max(0, Math.round(100 - high * 12 - medium * 5));
+  const run = {
+    runId: stableId("reg"),
+    status: high ? "需修复" : medium ? "有风险" : "通过",
+    score,
+    issues,
+    createdAt: new Date().toISOString(),
+  };
+  db.prepare(`
+    INSERT INTO regression_runs (project_id, run_id, status, score, issues_json, created_at)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `).run(project.id, run.runId, run.status, run.score, JSON.stringify(run.issues), run.createdAt);
+  return run;
+}
+
+function evaluatePromptText(promptText = "") {
+  const checks = [
+    { name: "连续性", pass: /连续|上一章|承接|记忆|RAG/.test(promptText), fix: "加入上一章尾声和 RAG 记忆约束。" },
+    { name: "人物状态", pass: /角色|人物|欲望|顾虑|选择|状态/.test(promptText), fix: "加入人物欲望、顾虑、状态机和关系变化。" },
+    { name: "字数", pass: /2200|3000|字数|目标/.test(promptText), fix: "加入 2200-3000 字硬约束。" },
+    { name: "去AI味", pass: /AI|物品清单|禁词|少解释|心理/.test(promptText), fix: "加入禁词、少物品堆叠和心理选择规则。" },
+    { name: "审查", pass: /审查|评分|回归|伏笔|一致/.test(promptText), fix: "加入生成后审查标准。" },
+  ];
+  const passed = checks.filter((item) => item.pass).length;
+  return {
+    score: Math.round((passed / checks.length) * 100),
+    cases: checks.map((item) => ({ ...item, status: item.pass ? "通过" : "待补" })),
+  };
+}
+
+function runPromptEval(project = {}) {
+  let prompt = db.prepare("SELECT * FROM prompt_versions WHERE project_id = ? AND active = 1 ORDER BY id DESC LIMIT 1").get(project.id);
+  if (!prompt) {
+    ensurePromptVersions(project);
+    prompt = db.prepare("SELECT * FROM prompt_versions WHERE project_id = ? AND active = 1 ORDER BY id DESC LIMIT 1").get(project.id);
+  }
+  const evalResult = evaluatePromptText(prompt?.prompt_text || "");
+  const run = {
+    evalId: stableId("peval"),
+    promptId: prompt?.prompt_id || "",
+    score: evalResult.score,
+    cases: evalResult.cases,
+    createdAt: new Date().toISOString(),
+  };
+  db.prepare(`
+    INSERT INTO prompt_eval_runs (project_id, eval_id, prompt_id, score, cases_json, created_at)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `).run(project.id, run.evalId, run.promptId, run.score, JSON.stringify(run.cases), run.createdAt);
+  return run;
+}
+
+function runEditorAgent(project = {}, chapterId = 0) {
+  const chapter = (project.chapters || []).find((item) => Number(item.id) === Number(chapterId)) || (project.chapters || [])[0] || {};
+  const text = String(chapter.manuscript || "");
+  const words = text.match(/[\u4e00-\u9fa5A-Za-z0-9]/g)?.length || 0;
+  const forbidden = (project.forbiddenWords || []).filter((word) => word && text.includes(word)).slice(0, 8);
+  const ragHits = hybridSearch({
+    projectId: project.id,
+    query: `${chapter.title || ""} ${chapter.outline || ""} ${(chapter.roles || []).join(" ")}`,
+    chapterId: Number(chapter.id || 0),
+    limit: 6,
+  });
+  const rounds = [
+    {
+      round: 1,
+      name: "诊断",
+      output: [
+        words ? `当前 ${words} 字。` : "当前没有正文，需要先生成或粘贴正文。",
+        forbidden.length ? `命中禁词：${forbidden.join("、")}。` : "未命中主要禁词。",
+        `RAG 可用上下文 ${ragHits.length} 条。`,
+      ],
+    },
+    {
+      round: 2,
+      name: "结构修复",
+      output: [
+        "开头先接上一章结果，再进入本章新麻烦。",
+        "中段保留两次选择：一次误判，一次反击或付代价。",
+        "结尾落到电话、提示框、资源变化或角色选择。",
+      ],
+    },
+    {
+      round: 3,
+      name: "人物鲜活",
+      output: [
+        "删掉静态场景清单，只留影响选择的细节。",
+        "补主角此刻怕什么、想保住什么、为什么还要赌。",
+        "每段心理后接动作或台词，不让人物原地解释。",
+      ],
+    },
+    {
+      round: 4,
+      name: "去AI味",
+      output: forbidden.length
+        ? forbidden.map((word) => `把“${word}”替换成具体动作、欲望、顾虑或结果反馈。`)
+        : ["继续避免模板词、宏大总结和空泛情绪标签。"],
+    },
+    {
+      round: 5,
+      name: "验收",
+      output: [
+        "检查字数 2200-3000。",
+        "检查计划角色都在正文里有动作或台词。",
+        "检查 RAG 记忆没有被照抄，只用于连续性。",
+      ],
+    },
+  ];
+  const run = {
+    runId: stableId("agent"),
+    projectId: project.id,
+    chapterId: Number(chapter.id || chapterId || 0),
+    rounds,
+    status: "已生成修订方案",
+    createdAt: new Date().toISOString(),
+  };
+  db.prepare(`
+    INSERT INTO editor_agent_runs (project_id, chapter_id, run_id, rounds_json, status, created_at)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `).run(project.id, run.chapterId, run.runId, JSON.stringify(rounds), run.status, run.createdAt);
+  return run;
+}
+
+function buildProductionSummary(projectId = "") {
+  const state = readSavedState();
+  const project = projectById(state, projectId);
+  const id = project?.id || projectId || "";
+  if (!id) return null;
+  const one = (sql, ...args) => db.prepare(sql).get(...args) || {};
+  const all = (sql, ...args) => db.prepare(sql).all(...args);
+  const latestRegression = one("SELECT * FROM regression_runs WHERE project_id = ? ORDER BY id DESC LIMIT 1", id);
+  const latestEval = one("SELECT * FROM prompt_eval_runs WHERE project_id = ? ORDER BY id DESC LIMIT 1", id);
+  const cost = one("SELECT COUNT(*) AS calls, SUM(input_tokens) AS inputTokens, SUM(output_tokens) AS outputTokens, SUM(total_tokens) AS totalTokens, SUM(estimated_cost) AS estimatedCost FROM cost_events WHERE project_id = ?", id);
+  const vectorKinds = all("SELECT source_kind AS kind, COUNT(*) AS count FROM vector_index WHERE project_id = ? GROUP BY source_kind ORDER BY count DESC LIMIT 8", id);
+  const facts = all("SELECT chapter_id, fact_type, subject, predicate, object, confidence FROM chapter_facts WHERE project_id = ? ORDER BY chapter_id DESC, id DESC LIMIT 12", id);
+  const states = all("SELECT character_name, chapter_id, status, location, goal, relation_snapshot FROM character_states WHERE project_id = ? ORDER BY id DESC LIMIT 12", id);
+  const versions = all("SELECT version_id, label, summary, created_at FROM plot_versions WHERE project_id = ? ORDER BY id DESC LIMIT 8", id);
+  const prompts = all("SELECT prompt_id, task, label, active, metrics_json, created_at FROM prompt_versions WHERE project_id = ? ORDER BY id DESC LIMIT 8", id);
+  const regressionRuns = all("SELECT run_id, status, score, issues_json, created_at FROM regression_runs WHERE project_id = ? ORDER BY id DESC LIMIT 6", id)
+    .map((run) => ({ ...run, issues: JSON.parse(run.issues_json || "[]").slice(0, 5), issues_json: undefined }));
+  const evalRuns = all("SELECT eval_id, prompt_id, score, cases_json, created_at FROM prompt_eval_runs WHERE project_id = ? ORDER BY id DESC LIMIT 6", id)
+    .map((run) => ({ ...run, cases: JSON.parse(run.cases_json || "[]"), cases_json: undefined }));
+  const agentRuns = all("SELECT run_id, chapter_id, rounds_json, status, created_at FROM editor_agent_runs WHERE project_id = ? ORDER BY id DESC LIMIT 4", id)
+    .map((run) => ({ ...run, rounds: JSON.parse(run.rounds_json || "[]"), rounds_json: undefined }));
+  return {
+    projectId: id,
+    title: project?.title || "",
+    counts: {
+      vectors: one("SELECT COUNT(*) AS count FROM vector_index WHERE project_id = ?", id).count || 0,
+      facts: one("SELECT COUNT(*) AS count FROM chapter_facts WHERE project_id = ?", id).count || 0,
+      characterStates: one("SELECT COUNT(*) AS count FROM character_states WHERE project_id = ?", id).count || 0,
+      plotVersions: one("SELECT COUNT(*) AS count FROM plot_versions WHERE project_id = ?", id).count || 0,
+      promptVersions: one("SELECT COUNT(*) AS count FROM prompt_versions WHERE project_id = ?", id).count || 0,
+      regressionRuns: one("SELECT COUNT(*) AS count FROM regression_runs WHERE project_id = ?", id).count || 0,
+      editorAgentRuns: one("SELECT COUNT(*) AS count FROM editor_agent_runs WHERE project_id = ?", id).count || 0,
+    },
+    latestRegression: latestRegression.run_id ? { runId: latestRegression.run_id, status: latestRegression.status, score: latestRegression.score, createdAt: latestRegression.created_at } : null,
+    latestPromptEval: latestEval.eval_id ? { evalId: latestEval.eval_id, promptId: latestEval.prompt_id, score: latestEval.score, createdAt: latestEval.created_at } : null,
+    cost: {
+      calls: Number(cost.calls || 0),
+      inputTokens: Number(cost.inputTokens || 0),
+      outputTokens: Number(cost.outputTokens || 0),
+      totalTokens: Number(cost.totalTokens || 0),
+      estimatedCost: Number(cost.estimatedCost || 0),
+    },
+    vectorKinds,
+    facts,
+    states,
+    versions,
+    prompts,
+    regressionRuns,
+    evalRuns,
+    agentRuns,
+  };
+}
+
 function persistMemory(state) {
   const now = new Date().toISOString();
   const rows = memoryRowsFromState(state);
@@ -968,6 +1715,7 @@ function persistMemory(state) {
     db.exec("ROLLBACK");
     throw error;
   }
+  syncProductionFromState(state);
 }
 
 function handleStatic(req, res) {
@@ -1086,6 +1834,93 @@ async function handleApi(req, res) {
     return;
   }
 
+  if (req.method === "GET" && url.pathname === "/api/production/summary") {
+    const projectId = url.searchParams.get("projectId") || "";
+    const summary = buildProductionSummary(projectId);
+    sendJson(res, summary ? 200 : 404, summary ? { ok: true, summary } : { ok: false, error: "未找到项目生产数据" });
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/production/sync") {
+    const payload = JSON.parse(await readBody(req) || "{}");
+    const state = readSavedState();
+    if (!state) {
+      sendJson(res, 400, { ok: false, error: "本地数据库还没有保存项目状态" });
+      return;
+    }
+    const result = syncProductionFromState(state, { projectId: payload.projectId || "" });
+    const summary = buildProductionSummary(payload.projectId || "");
+    sendJson(res, 200, { ok: true, result, summary });
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/production/search") {
+    const rows = hybridSearch({
+      projectId: url.searchParams.get("projectId") || "",
+      query: url.searchParams.get("q") || "",
+      chapterId: Number(url.searchParams.get("chapterId") || 0),
+      kind: url.searchParams.get("kind") || "",
+      limit: Number(url.searchParams.get("limit") || 12),
+    });
+    sendJson(res, 200, { ok: true, rows });
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/production/version") {
+    const payload = JSON.parse(await readBody(req) || "{}");
+    const state = readSavedState();
+    const project = projectById(state, payload.projectId || "");
+    if (!project) {
+      sendJson(res, 404, { ok: false, error: "未找到项目" });
+      return;
+    }
+    const version = createPlotVersion(project, payload.label || "手动剧情版本");
+    sendJson(res, 200, { ok: true, version, summary: buildProductionSummary(project.id) });
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/production/regression") {
+    const payload = JSON.parse(await readBody(req) || "{}");
+    const state = readSavedState();
+    const project = projectById(state, payload.projectId || "");
+    if (!project) {
+      sendJson(res, 404, { ok: false, error: "未找到项目" });
+      return;
+    }
+    syncProductionFromState(state, { projectId: project.id });
+    const run = runRegression(project);
+    sendJson(res, 200, { ok: true, run, summary: buildProductionSummary(project.id) });
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/production/prompt-eval") {
+    const payload = JSON.parse(await readBody(req) || "{}");
+    const state = readSavedState();
+    const project = projectById(state, payload.projectId || "");
+    if (!project) {
+      sendJson(res, 404, { ok: false, error: "未找到项目" });
+      return;
+    }
+    syncProductionFromState(state, { projectId: project.id });
+    const run = runPromptEval(project);
+    sendJson(res, 200, { ok: true, run, summary: buildProductionSummary(project.id) });
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/production/editor-agent") {
+    const payload = JSON.parse(await readBody(req) || "{}");
+    const state = readSavedState();
+    const project = projectById(state, payload.projectId || "");
+    if (!project) {
+      sendJson(res, 404, { ok: false, error: "未找到项目" });
+      return;
+    }
+    syncProductionFromState(state, { projectId: project.id });
+    const run = runEditorAgent(project, Number(payload.chapterId || 0));
+    sendJson(res, 200, { ok: true, run, summary: buildProductionSummary(project.id) });
+    return;
+  }
+
   if (req.method === "POST" && url.pathname === "/api/llm/generate") {
     const payload = JSON.parse(await readBody(req) || "{}");
     const state = readSavedState();
@@ -1112,10 +1947,19 @@ async function handleApi(req, res) {
         targetWords: Number(payload.targetWords || 2200),
       });
       if (!result.text) throw new Error("模型返回为空");
+      const cost = recordCostEvent({
+        projectId: payload.projectId || "",
+        chapterId: Number(payload.chapterId || 0),
+        provider: result.provider.name,
+        model: result.model,
+        task: result.route.task,
+        usage: result.usage,
+      });
       sendJson(res, 200, {
         ok: true,
         text: result.text,
         rag: ragPrompt.meta,
+        cost,
         usage: result.usage,
         provider: result.provider.name,
         providerId: result.provider.id,

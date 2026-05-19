@@ -41,6 +41,9 @@
           <button class="nav-item" data-page="models">
             <i data-lucide="sliders-horizontal"></i><span>模型配置</span>
           </button>
+          <button class="nav-item" data-page="production">
+            <i data-lucide="database-zap"></i><span>生产增强</span>
+          </button>
           <button class="nav-item" data-page="audit">
             <i data-lucide="scan-search"></i><span>一致性审查</span>
           </button>
@@ -739,6 +742,163 @@
                 </thead>
                 <tbody id="model-route-table"></tbody>
               </table>
+            </section>
+          </div>
+        </section>
+
+        <section class="page" id="production" aria-labelledby="production-title">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">生产增强中枢</p>
+              <h1 id="production-title">RAG、事实库、状态机、版本、回归与成本监控</h1>
+            </div>
+            <div class="inline-tools">
+              <button class="ghost-button" id="production-sync">
+                <i data-lucide="refresh-cw"></i><span>同步索引</span>
+              </button>
+              <button class="primary-button" id="production-regression">
+                <i data-lucide="shield-check"></i><span>回归审查</span>
+              </button>
+            </div>
+          </div>
+
+          <div class="metric-grid production-metrics">
+            <div class="metric-cell">
+              <span>向量片段</span>
+              <strong id="prod-vector-count">0</strong>
+              <em id="prod-vector-detail">等待同步</em>
+            </div>
+            <div class="metric-cell">
+              <span>章节事实</span>
+              <strong id="prod-fact-count">0</strong>
+              <em>结构化事实库</em>
+            </div>
+            <div class="metric-cell">
+              <span>人物状态</span>
+              <strong id="prod-state-count">0</strong>
+              <em>状态机快照</em>
+            </div>
+            <div class="metric-cell">
+              <span>回归评分</span>
+              <strong id="prod-regression-score">--</strong>
+              <em id="prod-regression-status">未运行</em>
+            </div>
+            <div class="metric-cell">
+              <span>Token 成本</span>
+              <strong id="prod-token-total">0</strong>
+              <em id="prod-cost-total">$0.0000</em>
+            </div>
+            <div class="metric-cell">
+              <span>提示词评测</span>
+              <strong id="prod-prompt-score">--</strong>
+              <em>版本化评测</em>
+            </div>
+          </div>
+
+          <div class="production-grid">
+            <section class="panel span-6">
+              <div class="panel-head">
+                <h2>混合检索</h2>
+                <button class="ghost-button" id="production-search-run">
+                  <i data-lucide="search"></i><span>检索</span>
+                </button>
+              </div>
+              <div class="production-search-row">
+                <input id="production-search-query" type="search" placeholder="搜角色、伏笔、上一章尾声、设定、文风规则" />
+                <input id="production-search-chapter" type="number" min="1" placeholder="章节" />
+                <select id="production-search-kind">
+                  <option value="">全部</option>
+                  <option value="memory">记忆</option>
+                  <option value="fact">事实</option>
+                  <option value="character_state">人物状态</option>
+                  <option value="prompt_version">提示词</option>
+                </select>
+              </div>
+              <div class="production-result-list" id="production-search-results"></div>
+            </section>
+
+            <section class="panel span-6">
+              <div class="panel-head">
+                <h2>章节事实库</h2>
+                <span class="muted">事实 / 伏笔 / 模型来源</span>
+              </div>
+              <table class="data-table compact">
+                <thead>
+                  <tr>
+                    <th>章</th>
+                    <th>类型</th>
+                    <th>主体</th>
+                    <th>事实</th>
+                    <th>置信</th>
+                  </tr>
+                </thead>
+                <tbody id="production-facts"></tbody>
+              </table>
+            </section>
+
+            <section class="panel span-6">
+              <div class="panel-head">
+                <h2>人物状态机</h2>
+                <span class="muted">目标、关系、位置和风险</span>
+              </div>
+              <table class="data-table compact">
+                <thead>
+                  <tr>
+                    <th>角色</th>
+                    <th>章</th>
+                    <th>状态</th>
+                    <th>当前位置</th>
+                    <th>下一目标</th>
+                  </tr>
+                </thead>
+                <tbody id="production-character-states"></tbody>
+              </table>
+            </section>
+
+            <section class="panel span-6">
+              <div class="panel-head">
+                <h2>剧情版本管理</h2>
+                <button class="ghost-button" id="production-version">
+                  <i data-lucide="git-branch"></i><span>新建版本</span>
+                </button>
+              </div>
+              <div class="production-version-list" id="production-versions"></div>
+            </section>
+
+            <section class="panel span-6">
+              <div class="panel-head">
+                <h2>自动回归审查</h2>
+                <span class="muted">生成后回归风险</span>
+              </div>
+              <div class="production-result-list" id="production-regression-list"></div>
+            </section>
+
+            <section class="panel span-6">
+              <div class="panel-head">
+                <h2>提示词版本评测</h2>
+                <button class="ghost-button" id="production-prompt-eval">
+                  <i data-lucide="clipboard-check"></i><span>评测</span>
+                </button>
+              </div>
+              <div class="production-result-list" id="production-prompt-evals"></div>
+            </section>
+
+            <section class="panel span-6">
+              <div class="panel-head">
+                <h2>成本与 Token 监控</h2>
+                <span class="muted">按真实调用沉淀</span>
+              </div>
+              <div class="production-cost-list" id="production-cost-list"></div>
+            </section>
+
+            <section class="panel span-6">
+              <div class="panel-head">
+                <h2>多轮编辑 Agent</h2>
+                <button class="ghost-button" id="production-editor-agent">
+                  <i data-lucide="wand-sparkles"></i><span>启动</span>
+                </button>
+              </div>
+              <div class="production-result-list" id="production-agent-runs"></div>
             </section>
           </div>
         </section>

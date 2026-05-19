@@ -186,6 +186,19 @@ const state = {
 const $ = (selector, scope = document) => scope.querySelector(selector);
 const $$ = (selector, scope = document) => Array.from(scope.querySelectorAll(selector));
 
+const productionCache = {
+  summary: null,
+  searchRows: [],
+  loading: false,
+  lastRun: null,
+};
+
+function resetProductionCache() {
+  productionCache.summary = null;
+  productionCache.searchRows = [];
+  productionCache.lastRun = null;
+}
+
 const DEFAULT_STYLE_SAMPLE = `她没有哭，也没有解释。
 
 门外的人还在等她低头。
@@ -920,7 +933,8 @@ function llmUsageText(meta = {}, chapter = null) {
     ? ` · 自动从 ${meta.requestedModel} 切到可用模型`
     : "";
   const rag = meta.rag?.used ? ` · RAG ${meta.rag.hits || 0} 条` : "";
-  return `${meta.provider || "-"} / ${meta.model || "-"}${meta.endpoint ? ` · ${meta.endpoint}` : ""}${auto}${rag} · input ${usage.inputTokens || 0} · output ${usage.outputTokens || 0} · total ${total || 0}`;
+  const cost = meta.cost?.estimatedCost ? ` · 估算 $${Number(meta.cost.estimatedCost).toFixed(4)}` : "";
+  return `${meta.provider || "-"} / ${meta.model || "-"}${meta.endpoint ? ` · ${meta.endpoint}` : ""}${auto}${rag} · input ${usage.inputTokens || 0} · output ${usage.outputTokens || 0} · total ${total || 0}${cost}`;
 }
 
 function recordLlmUsage(project, chapter, result) {
@@ -942,6 +956,7 @@ function recordLlmUsage(project, chapter, result) {
     endpoint: result.endpoint,
     fallbackFrom: result.fallbackFrom,
     rag: result.rag || null,
+    cost: result.cost || null,
     usage: { inputTokens, outputTokens, totalTokens },
     latencyMs: result.latencyMs,
     requestId: result.requestId,
@@ -2530,6 +2545,14 @@ function switchPage(pageId) {
   $$(".page").forEach((page) => page.classList.toggle("active", page.id === pageId));
   $$(".nav-item").forEach((item) => item.classList.toggle("active", item.dataset.page === pageId));
   window.scrollTo({ top: 0, behavior: "smooth" });
+  if (pageId === "production") {
+    const project = currentProject();
+    if (productionCache.summary?.projectId && productionCache.summary.projectId !== project?.id) {
+      resetProductionCache();
+      renderProduction();
+    }
+    window.setTimeout(() => loadProductionSummary({ silent: true }), 0);
+  }
 }
 
 function renderProjectSelect() {
@@ -3461,6 +3484,257 @@ function renderAudit() {
     .join("");
 }
 
+function productionNumber(value = 0) {
+  return Number(value || 0).toLocaleString("zh-CN");
+}
+
+function productionMoney(value = 0) {
+  return `$${Number(value || 0).toFixed(4)}`;
+}
+
+function productionSnippet(value = "", max = 240) {
+  const text = String(value || "").replace(/\s+/g, " ").trim();
+  return text.length > max ? `${text.slice(0, max)}...` : text;
+}
+
+function productionReadableText(value = "") {
+  const text = String(value || "").trim();
+  if (!text.startsWith("{")) return text;
+  const pickJsonField = (key) => {
+    const match = text.match(new RegExp(`"${key}"\\s*:\\s*"((?:\\\\.|[^"\\\\])*)"`));
+    return match ? match[1].replace(/\\n/g, " ").replace(/\\"/g, "\"").replace(/\\\\/g, "\\") : "";
+  };
+  try {
+    const parsed = JSON.parse(text);
+    return [
+      parsed.title,
+      parsed.memorySummary,
+      parsed.endingSnapshot ? `结尾：${parsed.endingSnapshot}` : "",
+      parsed.nextChapterBridge ? `承接：${parsed.nextChapterBridge}` : "",
+      parsed.outline,
+      parsed.detailedOutline?.core,
+    ].filter(Boolean).join("；") || text;
+  } catch {
+    return [
+      pickJsonField("title"),
+      pickJsonField("memorySummary"),
+      pickJsonField("endingSnapshot") ? `结尾：${pickJsonField("endingSnapshot")}` : "",
+      pickJsonField("nextChapterBridge") ? `承接：${pickJsonField("nextChapterBridge")}` : "",
+      pickJsonField("outline"),
+    ].filter(Boolean).join("；") || text;
+  }
+}
+
+function renderProductionList(selector, items = [], emptyText = "暂无数据") {
+  const node = $(selector);
+  if (!node) return;
+  node.innerHTML = items.length ? items.join("") : `<div class="production-result-item"><p>${emptyText}</p></div>`;
+}
+
+function renderProduction() {
+  if (!$("#prod-vector-count")) return;
+  const summary = productionCache.summary;
+  const counts = summary?.counts || {};
+  const cost = summary?.cost || {};
+  $("#prod-vector-count").textContent = productionNumber(counts.vectors || 0);
+  $("#prod-vector-detail").textContent = (summary?.vectorKinds || []).length
+    ? summary.vectorKinds.map((item) => `${item.kind}:${item.count}`).slice(0, 2).join(" / ")
+    : "等待同步";
+  $("#prod-fact-count").textContent = productionNumber(counts.facts || 0);
+  $("#prod-state-count").textContent = productionNumber(counts.characterStates || 0);
+  $("#prod-regression-score").textContent = summary?.latestRegression ? summary.latestRegression.score : "--";
+  $("#prod-regression-status").textContent = summary?.latestRegression ? summary.latestRegression.status : "未运行";
+  $("#prod-token-total").textContent = productionNumber(cost.totalTokens || 0);
+  $("#prod-cost-total").textContent = productionMoney(cost.estimatedCost || 0);
+  $("#prod-prompt-score").textContent = summary?.latestPromptEval ? summary.latestPromptEval.score : "--";
+
+  $("#production-facts").innerHTML = (summary?.facts || []).length
+    ? summary.facts.slice(0, 6).map((fact) => `
+        <tr>
+          <td>${fact.chapter_id}</td>
+          <td>${escapeHtml(fact.fact_type)}</td>
+          <td>${escapeHtml(fact.subject)}</td>
+          <td title="${escapeHtml(`${fact.predicate}：${fact.object}`)}">${escapeHtml(productionSnippet(`${fact.predicate}：${fact.object}`, 56))}</td>
+          <td>${Math.round(Number(fact.confidence || 0) * 100)}%</td>
+        </tr>
+      `).join("")
+    : `<tr><td colspan="5">暂无章节事实，点击“同步索引”。</td></tr>`;
+
+  $("#production-character-states").innerHTML = (summary?.states || []).length
+    ? summary.states.slice(0, 6).map((item) => `
+        <tr>
+          <td>${escapeHtml(item.character_name)}</td>
+          <td>${item.chapter_id || "-"}</td>
+          <td>${escapeHtml(item.status)}</td>
+          <td>${escapeHtml(item.location)}</td>
+          <td>${escapeHtml(item.goal)}</td>
+        </tr>
+      `).join("")
+    : `<tr><td colspan="5">暂无人物状态，点击“同步索引”。</td></tr>`;
+
+  renderProductionList("#production-search-results", productionCache.searchRows.map((row) => `
+    <article class="production-result-item">
+      <header><strong>${escapeHtml(row.sourceKind)} / ${escapeHtml(row.sourceRef)}</strong><em>${row.score}</em></header>
+      <p title="${escapeHtml(row.content)}">${escapeHtml(productionSnippet(productionReadableText(row.content), 360))}</p>
+      <em>关键词 ${row.keywordScore} · 向量 ${row.vectorScore} · 章节距离 ${row.chapterDistance}</em>
+    </article>
+  `), "输入查询词后点击“检索”。");
+
+  renderProductionList("#production-versions", (summary?.versions || []).map((item) => `
+    <article class="production-version-item">
+      <header><strong>${escapeHtml(item.label)}</strong><em>${new Date(item.created_at).toLocaleString("zh-CN", { hour12: false })}</em></header>
+      <p title="${escapeHtml(item.summary)}">${escapeHtml(productionSnippet(item.summary, 280))}</p>
+      <em>${escapeHtml(item.version_id)}</em>
+    </article>
+  `), "暂无剧情版本。");
+
+  renderProductionList("#production-regression-list", (summary?.regressionRuns || []).flatMap((run) => [
+    `<article class="production-result-item">
+      <header><strong>${escapeHtml(run.status)} · ${run.score} 分</strong><em>${new Date(run.created_at).toLocaleString("zh-CN", { hour12: false })}</em></header>
+      <p>${(run.issues || []).length ? escapeHtml(productionSnippet(run.issues.map((issue) => `${issue.type}/${issue.pos}：${issue.text}`).join("；"), 260)) : "未发现主要回归风险。"}</p>
+    </article>`,
+  ]), "尚未运行回归审查。");
+
+  renderProductionList("#production-prompt-evals", (summary?.evalRuns || []).map((run) => `
+    <article class="production-result-item">
+      <header><strong>提示词评测 ${run.score} 分</strong><em>${new Date(run.created_at).toLocaleString("zh-CN", { hour12: false })}</em></header>
+      <p>${escapeHtml((run.cases || []).map((item) => `${item.name}:${item.status}`).join(" / "))}</p>
+      <em>${escapeHtml(run.prompt_id || "")}</em>
+    </article>
+  `), "尚未评测提示词版本。");
+
+  renderProductionList("#production-cost-list", [
+    `<article class="production-cost-item">
+      <header><strong>${productionNumber(cost.calls || 0)} 次模型调用</strong><em>${productionMoney(cost.estimatedCost || 0)}</em></header>
+      <p>Input ${productionNumber(cost.inputTokens || 0)} · Output ${productionNumber(cost.outputTokens || 0)} · Total ${productionNumber(cost.totalTokens || 0)}</p>
+    </article>`,
+    ...(summary?.vectorKinds || []).map((item) => `
+      <article class="production-cost-item">
+        <header><strong>${escapeHtml(item.kind)}</strong><em>${productionNumber(item.count)}</em></header>
+        <p>向量索引分布</p>
+      </article>
+    `),
+  ], "暂无成本事件。");
+
+  renderProductionList("#production-agent-runs", (summary?.agentRuns || []).map((run) => `
+    <article class="production-result-item">
+      <header><strong>第 ${run.chapter_id} 章 · ${escapeHtml(run.status)}</strong><em>${new Date(run.created_at).toLocaleString("zh-CN", { hour12: false })}</em></header>
+      <p>${escapeHtml(productionSnippet((run.rounds || []).map((round) => `${round.round}.${round.name}：${(round.output || []).slice(0, 2).join("；")}`).join(" ｜ "), 300))}</p>
+    </article>
+  `), "尚未启动编辑 Agent。");
+}
+
+async function productionApi(path, options = {}) {
+  if (!canUseLocalService()) throw new Error("请用本地服务 http://127.0.0.1:4173 打开工作台。");
+  const response = await fetch(path, {
+    headers: { "Content-Type": "application/json", ...(options.headers || {}) },
+    ...options,
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok || payload.ok === false) throw new Error(payload.error || `请求失败 ${response.status}`);
+  return payload;
+}
+
+async function runProductionAction(buttonSelector, actionName, handler) {
+  const button = $(buttonSelector);
+  if (productionCache.loading) return;
+  productionCache.loading = true;
+  productionCache.lastRun = actionName;
+  if (button) button.disabled = true;
+  try {
+    await handler();
+  } catch (error) {
+    showToast(error.message || `${actionName}失败`);
+  } finally {
+    productionCache.loading = false;
+    if (button) button.disabled = false;
+    refreshIcons();
+  }
+}
+
+async function loadProductionSummary({ silent = false } = {}) {
+  const project = currentProject();
+  if (!project?.id || !canUseLocalService()) return;
+  try {
+    const payload = await productionApi(`/api/production/summary?projectId=${encodeURIComponent(project.id)}`);
+    productionCache.summary = payload.summary;
+    renderProduction();
+  } catch (error) {
+    if (!silent) showToast(error.message || "生产数据读取失败");
+  }
+}
+
+async function syncProductionIndex() {
+  await saveState("before-production-sync");
+  const project = currentProject();
+  const payload = await productionApi("/api/production/sync", {
+    method: "POST",
+    body: JSON.stringify({ projectId: project.id }),
+  });
+  productionCache.summary = payload.summary;
+  renderProduction();
+  showToast(`生产索引已同步：向量 ${payload.result?.vectors || 0}，事实 ${payload.result?.facts || 0}。`);
+}
+
+async function runProductionSearch() {
+  const project = currentProject();
+  const query = $("#production-search-query")?.value.trim() || project.title;
+  const chapterId = Number($("#production-search-chapter")?.value || state.activeChapterId || 0);
+  const kind = $("#production-search-kind")?.value || "";
+  const params = new URLSearchParams({ projectId: project.id, q: query, chapterId: String(chapterId), kind, limit: "12" });
+  const payload = await productionApi(`/api/production/search?${params.toString()}`);
+  productionCache.searchRows = payload.rows || [];
+  renderProduction();
+}
+
+async function createProductionVersion() {
+  const project = currentProject();
+  const label = `手动版本：第 ${project.currentChapter || state.activeChapterId || 0} 章前后`;
+  const payload = await productionApi("/api/production/version", {
+    method: "POST",
+    body: JSON.stringify({ projectId: project.id, label }),
+  });
+  productionCache.summary = payload.summary;
+  renderProduction();
+  showToast("剧情版本已保存。");
+}
+
+async function runProductionRegression() {
+  await saveState("before-production-regression");
+  const project = currentProject();
+  const payload = await productionApi("/api/production/regression", {
+    method: "POST",
+    body: JSON.stringify({ projectId: project.id }),
+  });
+  productionCache.summary = payload.summary;
+  renderProduction();
+  showToast(`回归审查完成：${payload.run.score} 分，${payload.run.status}。`);
+}
+
+async function runProductionPromptEval() {
+  await saveState("before-prompt-eval");
+  const project = currentProject();
+  const payload = await productionApi("/api/production/prompt-eval", {
+    method: "POST",
+    body: JSON.stringify({ projectId: project.id }),
+  });
+  productionCache.summary = payload.summary;
+  renderProduction();
+  showToast(`提示词评测完成：${payload.run.score} 分。`);
+}
+
+async function runProductionEditorAgent() {
+  await saveState("before-editor-agent");
+  const project = currentProject();
+  const payload = await productionApi("/api/production/editor-agent", {
+    method: "POST",
+    body: JSON.stringify({ projectId: project.id, chapterId: state.activeChapterId }),
+  });
+  productionCache.summary = payload.summary;
+  renderProduction();
+  showToast(`多轮编辑 Agent 已生成第 ${payload.run.chapterId} 章修订流程。`);
+}
+
 function renderAll() {
   state.projects.forEach(ensureProjectPlanning);
   renderProjectSelect();
@@ -3473,6 +3747,7 @@ function renderAll() {
   renderStylePage();
   renderSkills();
   renderModels();
+  renderProduction();
   renderAudit();
   refreshIcons();
 }
@@ -3519,6 +3794,7 @@ function createProject({ importOutline = false } = {}) {
   state.activeProjectId = id;
   state.activeChapterId = 1;
   state.pendingImportProjectId = importOutline ? id : null;
+  resetProductionCache();
   renderAll();
   switchPage(importOutline ? "outline" : "dashboard");
   saveStateSoon("create-project");
@@ -3535,6 +3811,7 @@ function openProject(projectId) {
   if (!project) return;
   state.activeProjectId = project.id;
   state.activeChapterId = project.chapters[0]?.id || 1;
+  resetProductionCache();
   renderAll();
   switchPage("dashboard");
   saveStateSoon("switch-project");
@@ -3556,6 +3833,7 @@ function deleteProject(projectId) {
     state.activeProjectId = nextProject.id;
     state.activeChapterId = nextProject.chapters[0]?.id || 1;
   }
+  resetProductionCache();
   renderAll();
   saveStateSoon("delete-project");
   showToast(`已删除《${project.title}》。`);
@@ -4852,6 +5130,7 @@ function bindEvents() {
   $("#project-select").addEventListener("change", (event) => {
     state.activeProjectId = event.target.value;
     state.activeChapterId = currentProject().chapters[0]?.id || 1;
+    resetProductionCache();
     renderAll();
     saveStateSoon("switch-project");
     showToast(`已切换到《${currentProject().title}》。`);
@@ -4999,6 +5278,29 @@ function bindEvents() {
     renderModels();
     saveStateSoon("add-route");
     showToast("已新增一条模型路由。");
+  });
+  $("#production-sync").addEventListener("click", () => {
+    runProductionAction("#production-sync", "同步生产索引", syncProductionIndex);
+  });
+  $("#production-search-run").addEventListener("click", () => {
+    runProductionAction("#production-search-run", "混合检索", runProductionSearch);
+  });
+  $("#production-search-query").addEventListener("keydown", (event) => {
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    runProductionAction("#production-search-run", "混合检索", runProductionSearch);
+  });
+  $("#production-version").addEventListener("click", () => {
+    runProductionAction("#production-version", "保存剧情版本", createProductionVersion);
+  });
+  $("#production-regression").addEventListener("click", () => {
+    runProductionAction("#production-regression", "自动回归审查", runProductionRegression);
+  });
+  $("#production-prompt-eval").addEventListener("click", () => {
+    runProductionAction("#production-prompt-eval", "提示词版本评测", runProductionPromptEval);
+  });
+  $("#production-editor-agent").addEventListener("click", () => {
+    runProductionAction("#production-editor-agent", "多轮编辑 Agent", runProductionEditorAgent);
   });
   $("#run-audit").addEventListener("click", () => {
     renderAudit();
