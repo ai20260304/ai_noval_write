@@ -1,0 +1,809 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>通用 AI 小说项目工作台</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar" aria-label="主导航">
+        <div class="brand">
+          <div class="brand-mark">文</div>
+          <div>
+            <strong>小说项目工厂</strong>
+            <span>AI Novel Studio</span>
+          </div>
+        </div>
+        <nav class="main-nav">
+          <button class="nav-item active" data-page="projects">
+            <i data-lucide="library"></i><span>项目库</span>
+          </button>
+          <button class="nav-item" data-page="dashboard">
+            <i data-lucide="layout-dashboard"></i><span>项目首页</span>
+          </button>
+          <button class="nav-item" data-page="outline">
+            <i data-lucide="book-open-text"></i><span>大纲中心</span>
+          </button>
+          <button class="nav-item" data-page="characters">
+            <i data-lucide="users-round"></i><span>角色进度</span>
+          </button>
+          <button class="nav-item" data-page="writer">
+            <i data-lucide="pen-line"></i><span>章节写作台</span>
+          </button>
+          <button class="nav-item" data-page="style">
+            <i data-lucide="fingerprint"></i><span>文风学习</span>
+          </button>
+          <button class="nav-item" data-page="skills">
+            <i data-lucide="badge-check"></i><span>Skill 管理</span>
+          </button>
+          <button class="nav-item" data-page="models">
+            <i data-lucide="sliders-horizontal"></i><span>模型配置</span>
+          </button>
+          <button class="nav-item" data-page="audit">
+            <i data-lucide="scan-search"></i><span>一致性审查</span>
+          </button>
+        </nav>
+        <div class="sidebar-status">
+          <span>工作区</span>
+          <strong>3 个项目</strong>
+        </div>
+      </aside>
+
+      <main class="workspace">
+        <header class="topbar">
+          <div class="project-switch">
+            <span>当前小说项目</span>
+            <select id="project-select" aria-label="切换小说项目"></select>
+          </div>
+          <div class="topbar-actions">
+            <label class="search-box">
+              <i data-lucide="search"></i>
+              <input type="search" placeholder="搜索项目、角色、章节、伏笔" />
+            </label>
+            <button class="ghost-button" id="top-import-outline">
+              <i data-lucide="upload"></i><span>导入大纲</span>
+            </button>
+            <button class="primary-button small" id="top-new-project">
+              <i data-lucide="plus"></i><span>新建小说</span>
+            </button>
+          </div>
+        </header>
+
+        <section class="page active" id="projects" aria-labelledby="projects-title">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">项目库</p>
+              <h1 id="projects-title">通用小说项目管理</h1>
+            </div>
+            <div class="inline-tools">
+              <button class="ghost-button" id="import-project-outline">
+                <i data-lucide="file-up"></i><span>导入大纲创建</span>
+              </button>
+              <button class="primary-button" id="create-project">
+                <i data-lucide="plus"></i><span>新建小说项目</span>
+              </button>
+            </div>
+          </div>
+
+          <div class="project-layout">
+            <section class="panel project-form-panel">
+              <div class="panel-head">
+                <h2>新建小说项目</h2>
+                <span class="status done">通用模板</span>
+              </div>
+              <div class="form-grid project-form">
+                <label>
+                  <span>小说标题</span>
+                  <input id="new-title" value="我的新小说" />
+                </label>
+                <label>
+                  <span>题材类型</span>
+                  <select id="new-genre">
+                    <option>末世爽文</option>
+                    <option>都市情感</option>
+                    <option>娱乐圈爽文</option>
+                    <option>玄幻升级</option>
+                    <option>悬疑探案</option>
+                    <option>自定义题材</option>
+                  </select>
+                </label>
+                <label>
+                  <span>目标总章数</span>
+                  <input id="new-total" type="number" value="1200" min="1" />
+                </label>
+                <label>
+                  <span>单章目标字数</span>
+                  <input id="new-words" type="number" value="2200" min="2200" max="3000" step="100" />
+                </label>
+                <label class="span-two">
+                  <span>一句话卖点</span>
+                  <input id="new-logline" value="主角带着未来记忆回到危机前，用信息差一路翻盘。" />
+                </label>
+              </div>
+              <div class="project-actions">
+                <button class="primary-button" id="create-from-form">
+                  <i data-lucide="folder-plus"></i><span>创建空项目</span>
+                </button>
+                <button class="ghost-button" id="create-and-import">
+                  <i data-lucide="file-input"></i><span>创建并导入大纲</span>
+                </button>
+              </div>
+            </section>
+
+            <section class="panel">
+              <div class="panel-head">
+                <h2>项目列表</h2>
+                <span class="muted" id="project-count">3 个项目</span>
+              </div>
+              <div class="project-list" id="project-list"></div>
+            </section>
+          </div>
+
+          <section class="panel template-panel">
+            <div class="panel-head">
+              <h2>项目初始化流程</h2>
+              <span class="muted">新项目也能从 0 到可写章节</span>
+            </div>
+            <div class="pipeline">
+              <div class="pipeline-step active">
+                <span>01</span><strong>创建小说项目</strong><em>标题、题材、目标章数</em>
+              </div>
+              <div class="pipeline-step">
+                <span>02</span><strong>导入或粘贴大纲</strong><em>总纲 / 分卷 / 人设</em>
+              </div>
+              <div class="pipeline-step">
+                <span>03</span><strong>自动拆章</strong><em>章节计划和关键事件</em>
+              </div>
+              <div class="pipeline-step">
+                <span>04</span><strong>学习文风</strong><em>样章、规则、禁忌</em>
+              </div>
+              <div class="pipeline-step">
+                <span>05</span><strong>写作与评分</strong><em>生成、审查、打分</em>
+              </div>
+            </div>
+          </section>
+        </section>
+
+        <section class="page" id="dashboard" aria-labelledby="dashboard-title">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">项目首页</p>
+              <h1 id="dashboard-title">项目总览</h1>
+            </div>
+            <div class="segmented-control" role="tablist" aria-label="时间范围">
+              <button class="active">今日</button>
+              <button>本周</button>
+              <button>全书</button>
+            </div>
+          </div>
+
+          <div class="metric-grid">
+            <div class="metric-cell">
+              <span>目标总章数</span>
+              <strong id="metric-total">0</strong>
+              <em id="metric-outline">待导入大纲</em>
+            </div>
+            <div class="metric-cell">
+              <span>当前进度</span>
+              <strong id="metric-current">第 0 章</strong>
+              <em id="metric-words">正文 0 字</em>
+            </div>
+            <div class="metric-cell">
+              <span>文风模型</span>
+              <strong id="metric-style">未训练</strong>
+              <em id="metric-style-detail">等待样章</em>
+            </div>
+            <div class="metric-cell">
+              <span>章节平均分</span>
+              <strong id="metric-score">--</strong>
+              <em id="metric-score-detail">完稿后打分</em>
+            </div>
+          </div>
+
+          <div class="dashboard-grid">
+            <section class="panel span-8">
+              <div class="panel-head">
+                <h2>今日写作队列</h2>
+                <button class="ghost-button">
+                  <i data-lucide="calendar-check"></i><span>排期</span>
+                </button>
+              </div>
+              <table class="data-table">
+                <thead>
+                  <tr>
+                    <th>章节</th>
+                    <th>节点</th>
+                    <th>任务</th>
+                    <th>角色</th>
+                    <th>状态</th>
+                    <th>评分</th>
+                  </tr>
+                </thead>
+                <tbody id="task-table"></tbody>
+              </table>
+            </section>
+
+            <section class="panel span-4">
+              <div class="panel-head">
+                <h2>项目健康度</h2>
+                <span class="muted" id="health-score">82%</span>
+              </div>
+              <div class="progress-stack">
+                <div>
+                  <span>大纲拆解</span>
+                  <meter id="health-outline" min="0" max="100" value="0"></meter>
+                </div>
+                <div>
+                  <span>角色轨迹</span>
+                  <meter id="health-character" min="0" max="100" value="0"></meter>
+                </div>
+                <div>
+                  <span>文风稳定</span>
+                  <meter id="health-style" min="0" max="100" value="0"></meter>
+                </div>
+                <div>
+                  <span>一致性风险</span>
+                  <meter id="health-audit" min="0" max="100" value="0"></meter>
+                </div>
+              </div>
+            </section>
+
+            <section class="panel span-5">
+              <div class="panel-head">
+                <h2>最近章节评分</h2>
+                <button class="ghost-button" data-jump="writer">
+                  <i data-lucide="external-link"></i><span>去打分</span>
+                </button>
+              </div>
+              <div class="score-list" id="recent-score-list"></div>
+            </section>
+
+            <section class="panel span-7">
+              <div class="panel-head">
+                <h2>生产流水线</h2>
+                <span class="muted">项目 -> 大纲 -> 文风 -> 写作 -> 评分 -> 审查</span>
+              </div>
+              <div class="pipeline">
+                <div class="pipeline-step complete">
+                  <span>01</span><strong>项目配置</strong><em>可多项目切换</em>
+                </div>
+                <div class="pipeline-step active">
+                  <span>02</span><strong>大纲拆章</strong><em id="pipeline-outline">待同步</em>
+                </div>
+                <div class="pipeline-step">
+                  <span>03</span><strong>文风学习</strong><em id="pipeline-style">待训练</em>
+                </div>
+                <div class="pipeline-step">
+                  <span>04</span><strong>章节写作</strong><em id="pipeline-writing">待生成</em>
+                </div>
+                <div class="pipeline-step">
+                  <span>05</span><strong>评分审查</strong><em id="pipeline-score">待打分</em>
+                </div>
+              </div>
+            </section>
+          </div>
+        </section>
+
+        <section class="page" id="outline" aria-labelledby="outline-title">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">大纲中心</p>
+              <h1 id="outline-title">导入、拆分和追踪任意小说大纲</h1>
+            </div>
+            <button class="primary-button" id="parse-outline">
+              <i data-lucide="wand-sparkles"></i><span>解析并拆章</span>
+            </button>
+          </div>
+
+          <div class="outline-layout">
+            <section class="panel import-panel">
+              <div class="panel-head">
+                <h2>大纲导入</h2>
+                <span class="status wait" id="outline-status">待导入</span>
+              </div>
+              <label class="drop-zone">
+                <i data-lucide="file-up"></i>
+                <input id="outline-file" type="file" accept=".txt,.md,.markdown" />
+                <strong>拖入大纲文件或点击选择</strong>
+                <span>支持 txt / md 总纲、分卷纲、人物小传、章节目录。Word 文档需在后端接解析器。</span>
+              </label>
+              <textarea class="outline-input" id="outline-input" aria-label="大纲片段">第一卷：开局立住主角和核心爽点
+001-050 章：主角获得关键优势，解决第一场危机，建立第一个稳定据点。
+关键事件：第一次公开碾压；重要角色加入；反派线索出现。
+伏笔：旧文件编号 A17，地下二层异常供电。</textarea>
+              <div class="outline-import-actions">
+                <button class="ghost-button" id="apply-outline-text">
+                  <i data-lucide="file-text"></i><span>用当前文本导入</span>
+                </button>
+                <span class="muted" id="outline-source">未选择文件</span>
+              </div>
+            </section>
+
+            <section class="panel volume-panel">
+              <div class="panel-head">
+                <h2>分卷结构</h2>
+                <div class="inline-tools">
+                  <button class="icon-button" title="新增分卷"><i data-lucide="plus"></i></button>
+                  <button class="icon-button" title="收起"><i data-lucide="panel-left-close"></i></button>
+                </div>
+              </div>
+              <div class="volume-tree" id="volume-tree"></div>
+            </section>
+
+            <section class="panel chapter-node-panel">
+              <div class="panel-head">
+                <h2>粗纲节点</h2>
+                <div class="inline-tools">
+                  <span class="muted" id="chapter-node-range">第 001-050 章</span>
+                  <button class="ghost-button" id="save-outline-nodes">
+                    <i data-lucide="save"></i><span>保存粗纲</span>
+                  </button>
+                </div>
+              </div>
+              <table class="data-table compact">
+                <thead>
+                  <tr>
+                    <th>章</th>
+                    <th>章节目标</th>
+                    <th>关键事件</th>
+                    <th>伏笔</th>
+                    <th>状态</th>
+                  </tr>
+                </thead>
+                <tbody id="outline-table"></tbody>
+              </table>
+            </section>
+
+            <section class="panel directory-panel">
+              <div class="panel-head">
+                <h2>章节目录与细纲</h2>
+                <div class="inline-tools">
+                  <span class="muted">由粗纲范围自动拆到每章</span>
+                  <button class="ghost-button" id="refresh-detail-outlines">
+                    <i data-lucide="refresh-cw"></i><span>按粗纲重生成细纲</span>
+                  </button>
+                </div>
+              </div>
+              <table class="data-table compact">
+                <thead>
+                  <tr>
+                    <th>章</th>
+                    <th>章名</th>
+                    <th>来源粗纲</th>
+                    <th>本章细纲</th>
+                    <th>状态</th>
+                  </tr>
+                </thead>
+                <tbody id="chapter-directory-table"></tbody>
+              </table>
+            </section>
+
+            <section class="panel clue-panel">
+              <div class="panel-head">
+                <h2>伏笔追踪</h2>
+                <button class="ghost-button">
+                  <i data-lucide="git-branch"></i><span>关系图</span>
+                </button>
+              </div>
+              <div class="clue-list" id="clue-list"></div>
+            </section>
+          </div>
+        </section>
+
+        <section class="page" id="characters" aria-labelledby="characters-title">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">角色进度页</p>
+              <h1 id="characters-title">角色出场、关系和缺席风险</h1>
+            </div>
+            <div class="table-toolbar">
+              <label class="select-label">
+                <span>风险</span>
+                <select id="risk-filter">
+                  <option value="all">全部</option>
+                  <option value="高">高</option>
+                  <option value="中">中</option>
+                  <option value="低">低</option>
+                </select>
+              </label>
+              <button class="ghost-button" id="reset-filter">
+                <i data-lucide="rotate-ccw"></i><span>重置</span>
+              </button>
+            </div>
+          </div>
+
+          <section class="panel">
+            <table class="data-table sticky-table">
+              <thead>
+                <tr>
+                  <th>角色</th>
+                  <th>定位</th>
+                  <th>首次出场</th>
+                  <th>计划出场章</th>
+                  <th>实际出场章</th>
+                  <th>缺席风险</th>
+                  <th>关系进展</th>
+                  <th>下一步</th>
+                </tr>
+              </thead>
+              <tbody id="character-table"></tbody>
+            </table>
+          </section>
+
+          <section class="panel background-panel">
+            <div class="panel-head">
+              <h2>公开背景资料补强</h2>
+              <span class="muted">仅使用公开履历做故事锚点</span>
+            </div>
+            <div class="background-list" id="background-list"></div>
+          </section>
+        </section>
+
+        <section class="page writer-page" id="writer" aria-labelledby="writer-title">
+          <div class="writer-shell">
+            <aside class="chapter-sidebar">
+              <div class="panel-head tight">
+                <h2>章节列表</h2>
+                <button class="icon-button" title="新增章节"><i data-lucide="plus"></i></button>
+              </div>
+              <div class="chapter-tabs" id="chapter-tabs">
+                <button class="active" data-filter="todo">待写 <span id="tab-count-todo">0</span></button>
+                <button data-filter="review">审查 <span id="tab-count-review">0</span></button>
+                <button data-filter="done">完成 <span id="tab-count-done">0</span></button>
+              </div>
+              <div class="chapter-list" id="chapter-list"></div>
+            </aside>
+
+            <section class="editor-panel">
+              <div class="editor-head">
+                <div>
+                  <p class="eyebrow">章节写作台</p>
+                  <h1 id="writer-title">章节写作</h1>
+                </div>
+                <div class="inline-tools">
+                  <button class="ghost-button" id="save-manuscript" data-command="save-manuscript">
+                    <i data-lucide="save"></i><span>保存</span>
+                  </button>
+                  <button class="ghost-button" id="submit-review" data-command="submit-review">
+                    <i data-lucide="send"></i><span>送审</span>
+                  </button>
+                  <button class="ghost-button" id="complete-chapter" data-command="complete-chapter">
+                    <i data-lucide="check-circle-2"></i><span>标记完成</span>
+                  </button>
+                  <button class="ghost-button" id="score-chapter" data-command="score-chapter">
+                    <i data-lucide="badge-percent"></i><span>完稿打分</span>
+                  </button>
+                  <button class="primary-button" id="generate-copy" data-command="generate-copy">
+                    <i data-lucide="sparkles"></i><span>按约束生成</span>
+                  </button>
+                </div>
+              </div>
+              <div class="editor-meta" id="editor-meta"></div>
+              <div class="generation-progress" id="generation-progress" hidden>
+                <div class="generation-progress-top">
+                  <strong id="generation-progress-title">准备生成</strong>
+                  <span id="generation-progress-percent">0%</span>
+                </div>
+                <div class="generation-progress-track">
+                  <span id="generation-progress-bar"></span>
+                </div>
+                <div class="generation-progress-detail">
+                  <span id="generation-progress-detail">等待任务开始</span>
+                  <span id="generation-progress-elapsed">0 秒</span>
+                </div>
+              </div>
+              <textarea class="manuscript" id="manuscript" aria-label="正文编辑器"></textarea>
+            </section>
+
+            <aside class="context-panel">
+              <div class="panel-head tight">
+                <h2>本章约束</h2>
+                <button class="icon-button" title="刷新约束"><i data-lucide="refresh-cw"></i></button>
+              </div>
+              <div class="context-block">
+                <h3>本章粗纲</h3>
+                <p id="chapter-outline"></p>
+              </div>
+              <div class="context-block">
+                <h3>连续性记忆</h3>
+                <div id="chapter-continuity" class="continuity-list"></div>
+              </div>
+              <div class="context-block detail-outline-block">
+                <div class="context-title-row">
+                  <h3>本章细纲</h3>
+                  <button class="mini-button" id="save-detail-outline" type="button">保存细纲</button>
+                </div>
+                <div class="detail-outline" id="chapter-detail-outline"></div>
+              </div>
+              <div class="context-block">
+                <h3>必须出场角色</h3>
+                <div class="tag-group" id="required-roles"></div>
+              </div>
+              <div class="context-block">
+                <h3>伏笔</h3>
+                <ul id="chapter-clues"></ul>
+              </div>
+              <div class="context-block">
+                <h3>风格要求</h3>
+                <ul id="chapter-style-rules"></ul>
+              </div>
+              <div class="context-block">
+                <h3>生成字数约束</h3>
+                <ul id="chapter-generation-contract"></ul>
+              </div>
+              <div class="context-block">
+                <h3>金手指设定</h3>
+                <ul id="chapter-gold-finger"></ul>
+              </div>
+              <div class="context-block">
+                <h3>模型调用</h3>
+                <p id="chapter-llm-status">尚未真实调用模型</p>
+              </div>
+              <div class="context-block score-context">
+                <div class="score-headline">
+                  <h3>章节评分</h3>
+                  <strong id="chapter-score-total">未评分</strong>
+                </div>
+                <div id="chapter-score-detail" class="score-bars"></div>
+              </div>
+            </aside>
+          </div>
+        </section>
+
+        <section class="page" id="style" aria-labelledby="style-title">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">文风学习</p>
+              <h1 id="style-title">从样章学习作者文风</h1>
+            </div>
+            <button class="primary-button" id="train-style">
+              <i data-lucide="brain-circuit"></i><span>训练文风画像</span>
+            </button>
+          </div>
+
+          <div class="style-layout">
+            <section class="panel">
+              <div class="panel-head">
+                <h2>样章导入</h2>
+                <span class="status wait" id="style-status">未训练</span>
+              </div>
+              <label class="drop-zone">
+                <i data-lucide="files"></i>
+                <input id="style-file" type="file" accept=".txt,.md,.doc,.docx" multiple />
+                <strong>导入 3-20 章代表样章</strong>
+                <span>用于学习句长、节奏、对话比例、爽点密度和禁忌表达。</span>
+              </label>
+              <textarea class="style-sample" id="style-sample" aria-label="样章文本">她没有哭，也没有解释。
+
+门外的人还在等她低头。
+
+可她只是把那份合同推回去，语气很轻：“这次，该你们求我了。”</textarea>
+            </section>
+
+            <section class="panel style-control-panel">
+              <div class="panel-head">
+                <h2>可编辑风格标签</h2>
+                <span class="status done">人工意图</span>
+              </div>
+              <div class="style-tag-editor" id="style-tag-editor"></div>
+            </section>
+
+            <section class="panel">
+              <div class="panel-head">
+                <h2>文风画像</h2>
+                <span class="muted" id="style-confidence">置信度 0%</span>
+              </div>
+              <div class="style-profile" id="style-profile"></div>
+            </section>
+
+            <section class="panel style-rule-panel">
+              <div class="panel-head">
+                <h2>多文风融合链路</h2>
+                <span class="status done">权重可调</span>
+              </div>
+              <div class="style-fusion-editor" id="style-fusion-editor"></div>
+            </section>
+
+            <section class="panel style-rule-panel">
+              <div class="panel-head">
+                <h2>生成约束</h2>
+                <span class="status done">可写入章节生成</span>
+              </div>
+              <div class="rule-grid" id="learned-rules"></div>
+            </section>
+
+            <section class="panel style-rule-panel">
+              <div class="panel-head">
+                <h2>高频词禁用</h2>
+                <span class="status risk">生成前扫描</span>
+              </div>
+              <div class="word-cloud" id="forbidden-words"></div>
+            </section>
+          </div>
+        </section>
+
+        <section class="page" id="skills" aria-labelledby="skills-title">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">Skill 管理</p>
+              <h1 id="skills-title">写作规则与题材模板</h1>
+            </div>
+            <button class="primary-button" id="import-skill">
+              <i data-lucide="file-plus-2"></i><span>导入 Skill</span>
+            </button>
+          </div>
+
+          <div class="skill-layout">
+            <section class="panel">
+              <div class="panel-head">
+                <h2>可用规则</h2>
+                <span class="muted">项目级启用</span>
+              </div>
+              <div class="skill-list" id="skill-list"></div>
+            </section>
+            <section class="panel skill-editor">
+              <div class="panel-head">
+                <h2>规则编辑</h2>
+                <span class="status done">自动应用到章节生成</span>
+              </div>
+              <label>
+                <span>Skill 名称</span>
+                <input value="番茄小白文" />
+              </label>
+              <label>
+                <span>适用任务</span>
+                <input value="章节正文生成 / 改写 / 开篇钩子增强 / 完稿评分" />
+              </label>
+              <label>
+                <span>规则内容</span>
+                <textarea>用大白话写，少作者解释，少形容词堆叠。人物先行动，再给结果。冲突要直接落到眼前，不绕弯。章节结尾必须有下一章钩子。</textarea>
+              </label>
+              <div class="rule-checks">
+                <label><input type="checkbox" checked /> 生成前注入</label>
+                <label><input type="checkbox" checked /> 评分时校验</label>
+                <label><input type="checkbox" checked /> 审查时校验</label>
+              </div>
+            </section>
+          </div>
+
+          <div class="skill-extra-grid">
+            <section class="panel">
+              <div class="panel-head">
+                <h2>娱乐圈爽文套路库</h2>
+                <span class="muted">热搜、综艺、资源、舆论战</span>
+              </div>
+              <div class="research-list" id="pattern-list"></div>
+            </section>
+            <section class="panel">
+              <div class="panel-head">
+                <h2>可发表暧昧尺度</h2>
+                <span class="status done">成年人 / 自愿 / 留白</span>
+              </div>
+              <ul class="rule-list" id="romance-rule-list"></ul>
+            </section>
+            <section class="panel">
+              <div class="panel-head">
+                <h2>娱乐圈高频禁词</h2>
+                <span class="status risk">去 AI 味</span>
+              </div>
+              <div class="word-cloud" id="skill-forbidden-list"></div>
+            </section>
+            <section class="panel">
+              <div class="panel-head">
+                <h2>故事路线补强</h2>
+                <span class="muted">真实行业年份锚点</span>
+              </div>
+              <ul class="rule-list" id="story-route-list"></ul>
+            </section>
+          </div>
+        </section>
+
+        <section class="page" id="models" aria-labelledby="models-title">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">模型配置</p>
+              <h1 id="models-title">多供应商 API Key 与任务模型路由</h1>
+            </div>
+            <button class="primary-button" id="save-models">
+              <i data-lucide="save"></i><span>保存配置</span>
+            </button>
+          </div>
+
+          <div class="model-page-layout">
+            <section class="panel">
+              <div class="panel-head">
+                <h2>模型供应商</h2>
+                <span class="status wait" id="key-status">未验证</span>
+              </div>
+              <div class="provider-grid" id="provider-grid"></div>
+            </section>
+
+            <section class="panel">
+              <div class="panel-head">
+                <h2>任务模型分配</h2>
+                <button class="ghost-button" id="add-route">
+                  <i data-lucide="plus"></i><span>新增路由</span>
+                </button>
+              </div>
+              <table class="data-table">
+                <thead>
+                  <tr>
+                    <th>任务</th>
+                    <th>供应商</th>
+                    <th>模型</th>
+                    <th>温度</th>
+                    <th>用途</th>
+                  </tr>
+                </thead>
+                <tbody id="model-route-table"></tbody>
+              </table>
+            </section>
+          </div>
+        </section>
+
+        <section class="page" id="audit" aria-labelledby="audit-title">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">一致性审查</p>
+              <h1 id="audit-title">角色、剧情、伏笔、时间线和文风偏移检查</h1>
+            </div>
+            <button class="primary-button" id="run-audit">
+              <i data-lucide="play"></i><span>开始审查</span>
+            </button>
+          </div>
+
+          <div class="audit-grid">
+            <section class="panel span-7">
+              <div class="panel-head">
+                <h2>审查结果</h2>
+                <span class="muted" id="audit-summary">等待审查</span>
+              </div>
+              <table class="data-table compact">
+                <thead>
+                  <tr>
+                    <th>类型</th>
+                    <th>位置</th>
+                    <th>问题</th>
+                    <th>严重度</th>
+                    <th>建议</th>
+                  </tr>
+                </thead>
+                <tbody id="audit-table"></tbody>
+              </table>
+            </section>
+            <section class="panel span-5">
+              <div class="panel-head">
+                <h2>时间线检查</h2>
+                <span class="status risk">需处理</span>
+              </div>
+              <div class="timeline" id="timeline-list"></div>
+            </section>
+            <section class="panel span-12">
+              <div class="panel-head">
+                <h2>功能完善检查</h2>
+                <span class="muted">当前原型剩余风险</span>
+              </div>
+              <table class="data-table compact">
+                <thead>
+                  <tr>
+                    <th>模块</th>
+                    <th>状态</th>
+                    <th>说明</th>
+                  </tr>
+                </thead>
+                <tbody id="feature-audit-list"></tbody>
+              </table>
+            </section>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+    <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+    <script src="./app.js?v=score-v3-goldfinger-20260517"></script>
+  </body>
+</html>

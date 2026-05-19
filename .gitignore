@@ -1,0 +1,32 @@
+# Local runtime data
+workbench.sqlite
+workbench.sqlite-*
+workbench.sqlite.*
+*.sqlite
+*.sqlite3
+*.db
+*.bak
+state_backups/
+recovered-chapter-objects.json
+
+# Secrets and local env
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+
+# Dependencies and logs
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+*.log
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
