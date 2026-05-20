@@ -3856,25 +3856,22 @@ function renderModels() {
     .map(
       (provider) => {
         const models = provider.availableModels || [];
-        const visibleModels = models.slice(0, 18);
+        const selectableModels = selectableProviderModels(provider);
+        const hiddenFailed = Math.max(0, models.length - selectableModels.length);
+        const listId = `provider-model-options-${provider.id}`;
         const modelList = models.length
           ? `
             <div class="provider-models">
               <div>
                 <strong>可用模型</strong>
-                <span>${models.length} 个${provider.modelListUpdatedAt ? ` · ${new Date(provider.modelListUpdatedAt).toLocaleString("zh-CN", { hour12: false })}` : ""}</span>
+                <span>${selectableModels.length} 个${hiddenFailed ? ` · 已隐藏不可用 ${hiddenFailed} 个` : ""}${provider.modelListUpdatedAt ? ` · ${new Date(provider.modelListUpdatedAt).toLocaleString("zh-CN", { hour12: false })}` : ""}</span>
               </div>
-              <div class="provider-model-chipset">
-                ${visibleModels.map((model) => {
-                  const probeClass = model.generationOk === true ? "usable" : model.generationOk === false ? "failed" : "";
-                  const title = model.generationOk === true
-                    ? `实测可生成 · ${model.endpoint || "api"}`
-                    : model.generationOk === false
-                      ? `生成失败：${model.error || "返回为空"}`
-                      : "已列出，尚未轻量生成验证";
-                  return `<button type="button" class="model-chip-button ${probeClass}" title="${escapeHtml(title)}" data-provider-model="${provider.id}" data-model="${escapeHtml(model.id)}">${escapeHtml(model.id)}</button>`;
-                }).join("")}
-                ${models.length > visibleModels.length ? `<em>还有 ${models.length - visibleModels.length} 个未显示</em>` : ""}
+              <div class="provider-model-picker">
+                <input class="model-search-input" list="${listId}" data-provider-model-input="${provider.id}" placeholder="搜索 / 选择可用模型" autocomplete="off" />
+                <datalist id="${listId}">
+                  ${modelOptionsHtml(selectableModels)}
+                </datalist>
+                ${selectableModels.length ? `<em>选择后会填入该供应商对应的任务路由。</em>` : `<em>本次测试没有发现可用模型。</em>`}
               </div>
             </div>
           `
@@ -3927,6 +3924,8 @@ function renderModels() {
         const provider = state.providers.find((item) => routeMatchesProvider(route, item));
         const hasModelList = Boolean(provider?.availableModels?.length);
         const unavailable = hasModelList && !modelIsAvailable(provider, route.model);
+        const selectableModels = selectableProviderModels(provider);
+        const modelListId = `route-model-options-${index}`;
         const providerOptions = [
           provider ? "" : `<option value="${escapeHtml(route.provider)}" selected>${escapeHtml(route.provider || "未配置供应商")}</option>`,
           ...state.providers.map((item) => {
@@ -3950,8 +3949,11 @@ function renderModels() {
             ${providerWarnings.length ? `<em class="route-warning">${escapeHtml(providerWarnings.join(" "))}</em>` : ""}
           </td>
           <td>
-            <input value="${escapeHtml(route.model)}" data-route-field="model" />
-            ${unavailable ? `<em class="route-warning">该模型不在 ${escapeHtml(provider.name)} 返回的可用列表中，测试后会自动改为可用模型。</em>` : ""}
+            <input value="${escapeHtml(route.model)}" list="${modelListId}" data-route-field="model" placeholder="搜索可用模型" autocomplete="off" />
+            <datalist id="${modelListId}">
+              ${modelOptionsHtml(selectableModels)}
+            </datalist>
+            ${unavailable ? `<em class="route-warning">该模型不在 ${escapeHtml(provider.name)} 的可用模型里，测试后会自动改为可用模型。</em>` : ""}
           </td>
           <td><input type="number" value="${escapeHtml(route.temperature)}" step="0.1" data-route-field="temperature" /></td>
           <td>${route.usage}</td>
@@ -4568,10 +4570,30 @@ function routeMatchesProvider(route, provider) {
 function modelIsAvailable(provider, modelId) {
   const id = String(modelId || "").trim().toLowerCase();
   if (!id) return false;
-  const models = provider?.availableModels || [];
-  const usable = models.filter((model) => model?.generationOk === true || model?.usable === true);
-  const candidates = usable.length ? usable : models.filter((model) => model?.generationOk !== false);
+  const candidates = selectableProviderModels(provider);
   return candidates.some((model) => String(model.id || model).toLowerCase() === id);
+}
+
+function selectableProviderModels(provider = {}) {
+  const rows = [
+    ...(provider.usableModels || []),
+    ...(provider.availableModels || []),
+  ]
+    .map((item) => (typeof item === "string" ? { id: item, name: item } : item))
+    .filter((item) => item?.id && item.generationOk !== false);
+  const seen = new Set();
+  return rows.filter((item) => {
+    const key = String(item.id || "").toLowerCase();
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function modelOptionsHtml(models = []) {
+  return models
+    .map((model) => `<option value="${escapeHtml(model.id)}">${escapeHtml(model.name && model.name !== model.id ? model.name : model.id)}</option>`)
+    .join("");
 }
 
 function scoreProviderModel(providerKind, modelId, requestedModel = "") {
@@ -5899,7 +5921,10 @@ function bindEvents() {
     showToast("Skill 导入原型：可接入题材模板、文风规则和评分标准。");
   });
   $("#save-models").addEventListener("click", () => saveModelSettings());
-  $("#provider-grid").addEventListener("input", () => syncModelSettingsFromDom());
+  $("#provider-grid").addEventListener("input", (event) => {
+    if (event.target.matches("[data-provider-model-input]")) return;
+    syncModelSettingsFromDom();
+  });
   $("#model-route-table").addEventListener("input", () => syncModelSettingsFromDom());
   $("#model-route-table").addEventListener("change", (event) => {
     if (!event.target.matches("select[data-route-field='provider']")) return;
@@ -5917,6 +5942,18 @@ function bindEvents() {
     testProviderConnection(button.dataset.provider);
   });
   $("#provider-grid").addEventListener("change", (event) => {
+    const modelInput = event.target.closest("[data-provider-model-input]");
+    if (modelInput) {
+      const providerId = modelInput.dataset.providerModelInput;
+      const provider = state.providers.find((item) => item.id === providerId);
+      const modelId = modelInput.value.trim();
+      const isSelectable = selectableProviderModels(provider).some((model) => String(model.id || "").toLowerCase() === modelId.toLowerCase());
+      if (provider && modelId && isSelectable) {
+        applyProviderModel(providerId, modelId);
+        modelInput.value = "";
+      }
+      return;
+    }
     if (event.target.matches("[data-provider-field]")) {
       syncModelSettingsFromDom();
       renderModels();

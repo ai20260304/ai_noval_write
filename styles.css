@@ -2028,7 +2028,8 @@ select:focus {
   font-size: 12px;
 }
 
-.provider-card input {
+.provider-card input,
+.provider-card select {
   width: 100%;
 }
 
@@ -2088,6 +2089,17 @@ select:focus {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
+}
+
+.provider-model-picker {
+  display: grid;
+  gap: 6px;
+}
+
+.provider-model-picker em {
+  color: var(--muted);
+  font-size: 12px;
+  font-style: normal;
 }
 
 .model-chip-button {
