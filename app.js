@@ -3871,10 +3871,28 @@ function renderModels() {
         const provider = state.providers.find((item) => routeMatchesProvider(route, item));
         const hasModelList = Boolean(provider?.availableModels?.length);
         const unavailable = hasModelList && !modelIsAvailable(provider, route.model);
+        const providerOptions = [
+          provider ? "" : `<option value="${escapeHtml(route.provider)}" selected>${escapeHtml(route.provider || "未配置供应商")}</option>`,
+          ...state.providers.map((item) => {
+            const selected = routeMatchesProvider(route, item) ? "selected" : "";
+            const suffix = item.enabled ? "" : "（未启用）";
+            return `<option value="${escapeHtml(item.name)}" ${selected}>${escapeHtml(item.name + suffix)}</option>`;
+          }),
+        ].filter(Boolean).join("");
+        const providerWarnings = [];
+        if (!provider) providerWarnings.push("该供应商不在配置列表中。");
+        else {
+          if (!provider.enabled) providerWarnings.push(`${provider.name} 未启用，调用时会被跳过。`);
+          if (!provider.key) providerWarnings.push(`${provider.name} 未填写 API Key。`);
+          if (provider.status === "连接失败") providerWarnings.push(`${provider.name} 最近一次连接失败。`);
+        }
         return `
         <tr data-route-index="${index}" class="${unavailable ? "route-model-unavailable" : ""}">
           <td>${route.task}</td>
-          <td>${route.provider}</td>
+          <td>
+            <select data-route-field="provider">${providerOptions}</select>
+            ${providerWarnings.length ? `<em class="route-warning">${escapeHtml(providerWarnings.join(" "))}</em>` : ""}
+          </td>
           <td>
             <input value="${escapeHtml(route.model)}" data-route-field="model" />
             ${unavailable ? `<em class="route-warning">该模型不在 ${escapeHtml(provider.name)} 返回的可用列表中，测试后会自动改为可用模型。</em>` : ""}
@@ -4457,6 +4475,7 @@ function syncModelSettingsFromDom({ persist = true, markVerified = false } = {})
   $$("#model-route-table tr").forEach((row) => {
     const route = state.routes[Number(row.dataset.routeIndex)];
     if (!route) return;
+    route.provider = $("select[data-route-field='provider']", row)?.value || route.provider;
     route.model = $("input[data-route-field='model']", row)?.value || route.model;
     route.temperature = $("input[data-route-field='temperature']", row)?.value || route.temperature;
   });
@@ -5809,6 +5828,11 @@ function bindEvents() {
   $("#save-models").addEventListener("click", () => saveModelSettings());
   $("#provider-grid").addEventListener("input", () => syncModelSettingsFromDom());
   $("#model-route-table").addEventListener("input", () => syncModelSettingsFromDom());
+  $("#model-route-table").addEventListener("change", (event) => {
+    if (!event.target.matches("select[data-route-field='provider']")) return;
+    syncModelSettingsFromDom();
+    renderModels();
+  });
   $("#provider-grid").addEventListener("click", (event) => {
     const modelButton = event.target.closest("[data-provider-model]");
     if (modelButton) {
