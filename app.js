@@ -166,18 +166,18 @@ const state = {
     },
   ],
   providers: [
-    { id: "openai", name: "GPT / OpenAI", key: "", baseUrl: "https://api.openai.com/v1", enabled: true, status: "待验证" },
-    { id: "deepseek", name: "DeepSeek", key: "", baseUrl: "https://api.deepseek.com/v1", enabled: true, status: "待验证" },
-    { id: "gemini", name: "Gemini", key: "", baseUrl: "https://generativelanguage.googleapis.com", enabled: false, status: "待验证" },
-    { id: "claude", name: "Claude / Anthropic", key: "", baseUrl: "https://api.anthropic.com/v1", enabled: false, status: "待验证" },
+    { id: "openai", name: "GPT / OpenAI", apiType: "openai", key: "", baseUrl: "https://api.openai.com/v1", enabled: true, status: "待验证" },
+    { id: "deepseek", name: "DeepSeek", apiType: "deepseek", key: "", baseUrl: "https://api.deepseek.com/v1", enabled: true, status: "待验证" },
+    { id: "gemini", name: "自定义供应商", apiType: "openai", key: "", baseUrl: "https://api.openai.com/v1", enabled: false, status: "待验证" },
+    { id: "claude", name: "Claude / Anthropic", apiType: "anthropic", key: "", baseUrl: "https://api.anthropic.com/v1", enabled: false, status: "待验证" },
   ],
   routes: [
     { task: "大纲拆分", provider: "GPT / OpenAI", model: "gpt-5.2", temperature: "0.3", usage: "长上下文结构化抽取" },
     { task: "章节正文", provider: "DeepSeek", model: "deepseek-chat", temperature: "0.8", usage: "高性价比正文初稿" },
     { task: "文风学习", provider: "Claude / Anthropic", model: "claude-sonnet-4.5", temperature: "0.2", usage: "样章分析和规则归纳" },
     { task: "完稿评分", provider: "GPT / OpenAI", model: "gpt-5.2", temperature: "0.1", usage: "剧情、文风、爽点评分" },
-    { task: "一致性审查", provider: "Gemini", model: "gemini-2.5-pro", temperature: "0.1", usage: "长上下文事实校验" },
-    { task: "公开资料补强", provider: "Gemini", model: "gemini-2.5-pro", temperature: "0.2", usage: "联网资料摘要与故事路线补强" },
+    { task: "一致性审查", provider: "自定义供应商", model: "gpt-5.5", temperature: "0.1", usage: "长上下文事实校验" },
+    { task: "公开资料补强", provider: "自定义供应商", model: "gpt-5.5", temperature: "0.2", usage: "联网资料摘要与故事路线补强" },
     { task: "尺度红线审查", provider: "Claude / Anthropic", model: "claude-sonnet-4.5", temperature: "0", usage: "暧昧、亲密、未成年和平台风险审查" },
     { task: "去 AI 味改写", provider: "DeepSeek", model: "deepseek-chat", temperature: "0.55", usage: "压解释腔、删模板词、补具体行业动作" },
   ],
@@ -1616,7 +1616,54 @@ function isMaskedApiKey(value = "") {
   return !text || /[\u2022\u25cf\u25e6\u2219]/.test(text) || /^[*•●]+$/.test(text);
 }
 
+function providerApiTypeOptions(selected = "openai") {
+  const options = [
+    ["openai", "OpenAI 兼容"],
+    ["deepseek", "DeepSeek 兼容"],
+    ["anthropic", "Claude / Anthropic"],
+    ["gemini", "Gemini 原生"],
+  ];
+  return options.map(([value, label]) => `<option value="${value}" ${value === selected ? "selected" : ""}>${label}</option>`).join("");
+}
+
+function inferProviderApiType(provider = {}) {
+  const existing = String(provider.apiType || provider.kind || "").toLowerCase();
+  if (["openai", "deepseek", "anthropic", "gemini"].includes(existing)) return existing;
+  const text = `${provider.id || ""} ${provider.name || ""} ${provider.baseUrl || ""}`.toLowerCase();
+  if (text.includes("deepseek")) return "deepseek";
+  if (text.includes("anthropic") || text.includes("claude")) return "anthropic";
+  if (text.includes("gemini") || text.includes("googleapis")) return "gemini";
+  return "openai";
+}
+
+function normalizeProviderConfig() {
+  (state.providers || []).forEach((provider) => {
+    provider.apiType = inferProviderApiType(provider);
+    if (provider.id === "gemini" && provider.name === "Gemini" && isMaskedApiKey(provider.key)) {
+      provider.name = "自定义供应商";
+      provider.apiType = "openai";
+      if (!provider.baseUrl || /generativelanguage\.googleapis\.com/.test(provider.baseUrl)) {
+        provider.baseUrl = "https://api.openai.com/v1";
+      }
+      provider.status = provider.enabled ? "待验证" : provider.status;
+      provider.lastTest = null;
+      provider.availableModels = [];
+      provider.usableModels = [];
+      provider.modelProbes = [];
+      provider.modelListError = "";
+    }
+  });
+  const customProvider = (state.providers || []).find((provider) => provider.id === "gemini" && provider.name !== "Gemini");
+  if (customProvider) {
+    (state.routes || []).forEach((route) => {
+      if (route.provider === "Gemini") route.provider = customProvider.name;
+      if (route.provider === customProvider.name && /^gemini-/i.test(route.model || "")) route.model = "gpt-5.5";
+    });
+  }
+}
+
 function normalizeProviderSecrets() {
+  normalizeProviderConfig();
   (state.providers || []).forEach((provider) => {
     if (isMaskedApiKey(provider.key)) {
       provider.key = "";
@@ -3804,6 +3851,7 @@ function buildChapterFixPlan(chapter) {
 }
 
 function renderModels() {
+  normalizeProviderConfig();
   $("#provider-grid").innerHTML = state.providers
     .map(
       (provider) => {
@@ -3842,6 +3890,14 @@ function renderModels() {
               <span></span>
             </label>
           </header>
+          <label>
+            <span>供应商名称</span>
+            <input value="${escapeHtml(provider.name)}" data-provider-field="name" />
+          </label>
+          <label>
+            <span>接口类型</span>
+            <select data-provider-field="apiType">${providerApiTypeOptions(provider.apiType || inferProviderApiType(provider))}</select>
+          </label>
           <label>
             <span>API Key</span>
             <input type="password" value="${escapeHtml(isMaskedApiKey(provider.key) ? "" : provider.key)}" placeholder="粘贴真实 API Key，不要填 •••• 占位符" data-provider-field="key" autocomplete="off" />
@@ -4456,18 +4512,33 @@ function syncModelSettingsFromDom({ persist = true, markVerified = false } = {})
     const provider = state.providers.find((item) => item.id === card.dataset.providerId);
     if (!provider) return;
     const enabledInput = $("input[data-provider]", card);
+    const nameInput = $("input[data-provider-field='name']", card);
+    const apiTypeInput = $("select[data-provider-field='apiType']", card);
     const keyInput = $("input[data-provider-field='key']", card);
     const baseUrlInput = $("input[data-provider-field='baseUrl']", card);
     const nextKey = keyInput?.value || "";
     const normalizedKey = isMaskedApiKey(nextKey) ? "" : nextKey.trim();
+    const previousName = provider.name || "";
+    const previousApiType = provider.apiType || inferProviderApiType(provider);
     const previousKey = provider.key || "";
     const previousBaseUrl = provider.baseUrl || "";
     provider.enabled = enabledInput?.checked ?? provider.enabled;
+    provider.name = (nameInput?.value || provider.name || "自定义供应商").trim();
+    provider.apiType = apiTypeInput?.value || previousApiType;
     provider.key = normalizedKey;
     provider.baseUrl = baseUrlInput?.value || provider.baseUrl;
-    if (normalizedKey !== previousKey || provider.baseUrl !== previousBaseUrl) {
+    if (previousName && provider.name !== previousName) {
+      (state.routes || []).forEach((route) => {
+        if (route.provider === previousName || route.provider === provider.id) route.provider = provider.name;
+      });
+    }
+    if (normalizedKey !== previousKey || provider.baseUrl !== previousBaseUrl || provider.apiType !== previousApiType) {
       provider.status = "待验证";
       provider.lastTest = null;
+      provider.availableModels = [];
+      provider.usableModels = [];
+      provider.modelProbes = [];
+      provider.modelListError = "";
     }
     if (markVerified && provider.enabled && provider.lastTest?.ok) provider.status = "已连接";
   });
@@ -4503,8 +4574,9 @@ function modelIsAvailable(provider, modelId) {
   return candidates.some((model) => String(model.id || model).toLowerCase() === id);
 }
 
-function scoreProviderModel(providerId, modelId, requestedModel = "") {
+function scoreProviderModel(providerKind, modelId, requestedModel = "") {
   const id = String(modelId || "").toLowerCase();
+  const kind = String(providerKind || "").toLowerCase();
   const requested = String(requestedModel || "").toLowerCase();
   if (!id) return -Infinity;
   if (requested && id === requested) return 100000;
@@ -4515,7 +4587,7 @@ function scoreProviderModel(providerId, modelId, requestedModel = "") {
     if (family && id.startsWith(family)) score += 120;
   }
 
-  if (providerId === "openai") {
+  if (kind === "openai") {
     if (id.includes("gpt-5.5")) score += 95;
     else if (id.includes("gpt-5.4")) score += 90;
     else if (id.includes("gpt-5.3")) score += 80;
@@ -4524,13 +4596,13 @@ function scoreProviderModel(providerId, modelId, requestedModel = "") {
     if (id.includes("codex")) score -= 18;
     if (id.includes("nano")) score -= 35;
     if (id.includes("mini")) score -= 14;
-  } else if (providerId === "deepseek") {
+  } else if (kind === "deepseek") {
     if (id.includes("chat")) score += 70;
     if (id.includes("reasoner")) score += 45;
-  } else if (providerId === "gemini") {
+  } else if (kind === "gemini") {
     if (id.includes("pro")) score += 70;
     if (id.includes("flash")) score += 45;
-  } else if (providerId === "claude") {
+  } else if (kind === "anthropic" || kind === "claude") {
     if (id.includes("sonnet")) score += 70;
     if (id.includes("opus")) score += 65;
     if (id.includes("haiku")) score += 35;
@@ -4548,8 +4620,9 @@ function chooseProviderModel(provider, requestedModel = "") {
   const exact = models.find((model) => String(model.id || model).toLowerCase() === requested);
   if (exact) return exact.id || exact;
   if (!usableModels.length) return models[0]?.id || models[0] || "";
+  const providerKind = provider?.apiType || inferProviderApiType(provider);
   return [...models]
-    .sort((a, b) => scoreProviderModel(provider.id, b.id || b, requestedModel) - scoreProviderModel(provider.id, a.id || a, requestedModel))
+    .sort((a, b) => scoreProviderModel(providerKind, b.id || b, requestedModel) - scoreProviderModel(providerKind, a.id || a, requestedModel))
     [0]?.id || models[0]?.id || models[0] || "";
 }
 
@@ -5844,6 +5917,11 @@ function bindEvents() {
     testProviderConnection(button.dataset.provider);
   });
   $("#provider-grid").addEventListener("change", (event) => {
+    if (event.target.matches("[data-provider-field]")) {
+      syncModelSettingsFromDom();
+      renderModels();
+      return;
+    }
     if (!event.target.matches("[data-provider]")) return;
     const provider = state.providers.find((item) => item.id === event.target.dataset.provider);
     syncModelSettingsFromDom({ persist: false });

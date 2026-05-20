@@ -280,6 +280,9 @@ function versionedBaseUrl(kind, baseUrl) {
 }
 
 function providerKind(provider = {}, route = {}) {
+  const explicit = String(provider.apiType || provider.kind || "").toLowerCase();
+  if (["openai", "deepseek", "gemini"].includes(explicit)) return explicit;
+  if (explicit === "anthropic" || explicit === "claude") return "anthropic";
   const text = `${provider.id || ""} ${provider.name || ""} ${route.provider || ""}`.toLowerCase();
   if (text.includes("deepseek")) return "deepseek";
   if (text.includes("anthropic") || text.includes("claude")) return "anthropic";
@@ -320,6 +323,7 @@ function findRouteAndProvider(state, taskName, providerId = "") {
   const routeProvider = String(route.provider || "").toLowerCase();
   const provider = requestedProvider
     || providers.find((item) => String(item.name || "").toLowerCase() === routeProvider)
+    || providers.find((item) => String(item.id || "").toLowerCase() === routeProvider || routeProvider.includes(String(item.id || "").toLowerCase()))
     || providers.find((item) => String(item.name || "").toLowerCase().includes(routeProvider) || routeProvider.includes(String(item.name || "").toLowerCase()))
     || providers.find((item) => providerKind(item, route) === providerKind({}, route));
   if (!provider) throw new Error(`未找到供应商配置：${route.provider}`);
