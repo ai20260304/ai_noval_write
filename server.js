@@ -1631,6 +1631,30 @@ function isEarlyLiuyifeiChapterServer(project = {}, chapter = {}) {
     && /刘亦菲/.test(`${chapter.title || ""}${chapter.outline || ""}${detail.core || ""}${detail.sourceNode || ""}`);
 }
 
+function previousStoryTextBeforeServer(project = {}, chapterId = 0, lookback = 8) {
+  const currentId = Number(chapterId || 0);
+  return sortChaptersByIdServer(project.chapters || [])
+    .filter((item) => Number(item.id || 0) < currentId)
+    .slice(-lookback)
+    .map((item) => [
+      item.title,
+      item.manuscript,
+      item.memorySummary,
+      item.endingSnapshot,
+      JSON.stringify(item.detailedOutline || ""),
+    ].filter(Boolean).join("\n"))
+    .join("\n");
+}
+
+function liuyifeiKnowsChenXuanBeforeServer(project = {}, chapter = {}) {
+  const previousText = previousStoryTextBeforeServer(project, chapter.id);
+  if (!previousText || !previousText.includes("刘亦菲") || !previousText.includes("陈玄")) return false;
+  return /刘亦菲[\s\S]{0,900}“陈玄[！!，,。—-]/.test(previousText)
+    || /“陈玄[！!，,。—-][\s\S]{0,900}刘亦菲/.test(previousText)
+    || /刘亦菲[\s\S]{0,500}不知道你叫什么名字[\s\S]{0,80}“陈玄/.test(previousText)
+    || /“陈玄，”她念了一遍/.test(previousText);
+}
+
 function unsupportedContinuityFactIssuesServer(project = {}, chapter = {}) {
   const text = String(chapter.manuscript || "");
   if (!text) return [];
@@ -1657,6 +1681,15 @@ function unsupportedContinuityFactIssuesServer(project = {}, chapter = {}) {
       text: `正文新增了前文和细纲没有支撑的私密事实：${word}。`,
       fix: "删除凭空新增事实，改用已出现的报纸、选角通告、电话预言、试镜结果等连续性证据。",
     }));
+  if (liuyifeiKnowsChenXuanBeforeServer(project, chapter) && /我没记住你全名|还不知道你叫什么名字|不知道你叫什么名字|第一次知道.*陈玄|重新知道.*陈玄/.test(text)) {
+    issues.push({
+      level: "高",
+      type: "连续性",
+      pos: `第${chapter.id}章`,
+      text: "身份认知重复：前文刘亦菲已经知道陈玄姓名，本章又写成重新问名或第一次记住。",
+      fix: "删除重新问名桥段，让刘亦菲直接称呼陈玄；把冲突改到事业结果、监护人边界或信任推进上。",
+    });
+  }
   if (isEarlyLiuyifeiChapterServer(project, chapter) && /十块钱|10块|三十块钱|30块/.test(text)) {
     issues.push({
       level: "高",

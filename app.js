@@ -552,6 +552,37 @@ function projectOpenThreads(project) {
     .slice(0, 4);
 }
 
+function previousStoryTextBefore(project, chapterId, lookback = 8) {
+  const currentId = Number(chapterId || 0);
+  return sortChaptersById(project?.chapters || [])
+    .filter((item) => Number(item.id || 0) < currentId)
+    .slice(-lookback)
+    .map((item) => [
+      item.title,
+      item.manuscript,
+      item.memorySummary,
+      item.endingSnapshot,
+      JSON.stringify(item.detailedOutline || ""),
+    ].filter(Boolean).join("\n"))
+    .join("\n");
+}
+
+function liuyifeiKnowsChenXuanBefore(project, chapter) {
+  const previousText = previousStoryTextBefore(project, chapter?.id);
+  if (!previousText || !previousText.includes("刘亦菲") || !previousText.includes("陈玄")) return false;
+  return /刘亦菲[\s\S]{0,900}“陈玄[！!，,。—-]/.test(previousText)
+    || /“陈玄[！!，,。—-][\s\S]{0,900}刘亦菲/.test(previousText)
+    || /刘亦菲[\s\S]{0,500}不知道你叫什么名字[\s\S]{0,80}“陈玄/.test(previousText)
+    || /“陈玄，”她念了一遍/.test(previousText);
+}
+
+function identityContinuityLines(project, chapter) {
+  if (!isEntertainmentProject(project) || !liuyifeiKnowsChenXuanBefore(project, chapter)) return [];
+  return [
+    "身份认知锁：刘亦菲已知道男主叫陈玄，后续不能再写“我没记住你全名”“我还不知道你叫什么名字”或重新认识姓名；需要互动时直接称呼陈玄，把戏剧点放在事业结果、边界和信任推进上。",
+  ];
+}
+
 function buildChapterContinuityMemory(project, chapter, lookback = 3) {
   const sorted = sortChaptersById(project?.chapters || []);
   const currentId = Number(chapter?.id) || 0;
@@ -567,6 +598,7 @@ function buildChapterContinuityMemory(project, chapter, lookback = 3) {
   const currentNeed = chapterOutlineMemoryText(chapter, 200);
   const previousProgress = previous ? updateChapterProgressState(project, previous) : null;
   const currentProgress = updateChapterProgressState(project, chapter);
+  const identityLines = identityContinuityLines(project, chapter);
   const progressLines = [
     previousProgress ? `上章数值：${chapterProgressSummary(previousProgress)}` : "",
     currentProgress ? `本章数值：${chapterProgressSummary(currentProgress)}` : "",
@@ -577,6 +609,7 @@ function buildChapterContinuityMemory(project, chapter, lookback = 3) {
     previousSummary ? `上一章摘要：${previousSummary}` : "",
     `本章必须接住：${currentNeed || compactMemoryText(chapter?.title || "", 160)}`,
     progressLines.length ? `数值状态：${progressLines.join(" ｜ ")}` : "",
+    identityLines.length ? `身份状态：${identityLines.join(" ｜ ")}` : "",
     recentLines.length ? `最近剧情：${recentLines.join(" ｜ ")}` : "",
     roleLines.length ? `角色状态：${roleLines.join(" ｜ ")}` : "",
     openThreads.length ? `未回收线索：${openThreads.join(" ｜ ")}` : "",
@@ -592,6 +625,7 @@ function buildChapterContinuityMemory(project, chapter, lookback = 3) {
     previousBridge,
     currentNeed,
     progressLines,
+    identityLines,
     recentLines,
     roleLines,
     openThreads,
@@ -644,6 +678,9 @@ function factualContinuityRules(project, chapter) {
   const rules = [];
   if (unsupportedPrivateFacts) {
     rules.push(`事实锁定：上一章正文和本章细纲没有写到的私密验证点禁止新增，尤其不能凭空写：${unsupportedPrivateFacts}。需要增强信任时，只能使用已经出现的报纸、选角通告、演员路、电话、试镜结果等事实。`);
+  }
+  if (liuyifeiKnowsChenXuanBefore(project, chapter)) {
+    rules.push("身份认知锁：刘亦菲已知道陈玄姓名，禁止再写她问“你叫什么名字”“我没记住你全名”或像第一次听到“陈玄”；她可以直接叫陈玄，互动重点放在信任、事业结果和边界感。");
   }
   if (isEarlyLiuyifeiChapter(project, chapter)) {
     rules.push("刘亦菲前 7 章金额锁定：陈玄开局兜里只有七块钱；刘亦菲补算命费也只能写七块钱。禁止写十块钱、10块钱、三十块钱或临时改价。");
@@ -4936,6 +4973,15 @@ function unsupportedContinuityFactIssues(project, chapter, text = "", currentDet
       text: `正文新增了前文和细纲没有支撑的私密事实：${word}。`,
       fix: "删除该私密事实，改用已出现的报纸、选角通告、电话预言、试镜结果等连续性证据。",
     }));
+
+  if (liuyifeiKnowsChenXuanBefore(project, chapter) && /我没记住你全名|还不知道你叫什么名字|不知道你叫什么名字|第一次知道.*陈玄|重新知道.*陈玄/.test(text)) {
+    issues.push({
+      type: "连续性",
+      level: "高",
+      text: "身份认知重复：前文刘亦菲已经知道陈玄姓名，本章又写成重新问名或第一次记住。",
+      fix: "删除重新问名桥段，让刘亦菲直接称呼陈玄；把冲突改到事业结果、监护人边界或信任推进上。",
+    });
+  }
 
   if (isEarlyLiuyifeiChapter(project, chapter) && /十块钱|10块|三十块钱|30块/.test(text)) {
     issues.push({
