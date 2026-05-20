@@ -1189,6 +1189,88 @@ function maxPercentEventServer(events = []) {
   }, null);
 }
 
+function normalizeCharacterStatNameServer(name = "") {
+  return characterShortNameServer(String(name || "").replace(/[【】\[\]：:·的\s]/g, ""));
+}
+
+function isPrimaryProtagonistNameServer(name = "") {
+  return /^(陈玄|男主|主角|宿主)$/.test(characterShortNameServer(name));
+}
+
+function isInvalidCharacterStatNameServer(name = "") {
+  const short = characterShortNameServer(name);
+  return /^(目标|当前|系统|面板|检测|高星|星运|看见|显示|提示|宿主|新增|建议|数字)$/.test(short)
+    || /他|她|它|自己|看见|面板|系统|提示|目标|而|上|下/.test(short);
+}
+
+function defaultTargetCharacterForChapterServer(chapter = {}) {
+  const roles = (chapter.roles || [])
+    .map((role) => characterShortNameServer(role))
+    .filter((name) => name && !isPrimaryProtagonistNameServer(name));
+  return roles.length === 1 ? roles[0] : "";
+}
+
+function collectCharacterStatEventsServer(chapter = {}) {
+  const text = stateTextFromChapterServer(chapter);
+  const defaultTarget = defaultTargetCharacterForChapterServer(chapter);
+  const events = [];
+  const add = (name, value, from, index, evidence) => {
+    const character = normalizeCharacterStatNameServer(name || defaultTarget);
+    const numeric = clampPercentServer(value);
+    if (!character || isInvalidCharacterStatNameServer(character) || numeric === null) return;
+    events.push({
+      character,
+      key: "starLuck",
+      label: `${character}星运/幸运值`,
+      value: numeric,
+      from: from === null || from === undefined ? null : clampPercentServer(from),
+      unit: "/100",
+      index: index || 0,
+      evidence: compactRagText(evidence, 90),
+    });
+  };
+
+  const namedTransition = /([一-龥]{2,4})(?:[·的\s：:]){0,3}(?:星运值|星运指数|幸运值|气运值)[^。\n]{0,24}?(\d{1,3})\s*(?:\/\s*100|%)?\s*(?:→|->|—|-|~|～|至|到|涨到|升到|提升到|爬到|冲到|跳到|变成)\s*(\d{1,3})\s*(?:\/\s*100|%)?/g;
+  const namedSingle = /([一-龥]{2,4})(?:[·的\s：:]){0,3}(?:星运值|星运指数|幸运值|气运值)[^。\n]{0,18}?(\d{1,3})\s*(?:\/\s*100|%)?/g;
+  const targetTransition = /(?:目标|当前目标|目标对象)[^。\n]{0,8}(?:星运值|星运指数|幸运值|气运值)[^。\n]{0,18}?(\d{1,3})\s*(?:\/\s*100|%)?\s*(?:→|->|—|-|~|～|至|到|涨到|升到|提升到|爬到|冲到|跳到|变成)\s*(\d{1,3})\s*(?:\/\s*100|%)?/g;
+  const targetSingle = /(?:目标|当前目标|目标对象)[^。\n]{0,8}(?:星运值|星运指数|幸运值|气运值)[^。\n]{0,18}?(\d{1,3})\s*(?:\/\s*100|%)?/g;
+  const continuationSingle = /(?:星运值|星运指数|幸运值|气运值)[^。\n]{0,12}?(?:停在|显示|变成|为|是|：|:)[“"']?(\d{1,3})[”"']?\s*(?:\/\s*100|%)?/g;
+  const climbPattern = /([一-龥]{2,4})的(?:星运值|星运指数|幸运值|气运值)[^。\n]{0,24}?从\s*(\d{1,3})\s*(?:\/\s*100|%)?\s*(?:爬到|涨到|升到|到|变成)\s*(\d{1,3})\s*(?:\/\s*100|%)?/g;
+
+  for (const match of text.matchAll(namedTransition)) add(match[1], match[3], match[2], match.index, match[0]);
+  for (const match of text.matchAll(climbPattern)) add(match[1], match[3], match[2], match.index, match[0]);
+  for (const match of text.matchAll(namedSingle)) add(match[1], match[2], null, match.index, match[0]);
+  if (defaultTarget) {
+    for (const match of text.matchAll(targetTransition)) add(defaultTarget, match[2], match[1], match.index, match[0]);
+    for (const match of text.matchAll(targetSingle)) add(defaultTarget, match[1], null, match.index, match[0]);
+  }
+
+  const explicitCharacters = new Set(events.map((event) => event.character));
+  if (explicitCharacters.size === 1) {
+    const [character] = [...explicitCharacters];
+    for (const match of text.matchAll(continuationSingle)) add(character, match[1], null, match.index, match[0]);
+  }
+
+  return events.sort((a, b) => a.index - b.index);
+}
+
+function extractCharacterStatsServer(chapter = {}) {
+  const grouped = new Map();
+  for (const event of collectCharacterStatEventsServer(chapter)) {
+    const previous = grouped.get(event.character);
+    if (!previous || event.value > previous.value || (event.value === previous.value && previous.from === null && event.from !== null)) {
+      grouped.set(event.character, event);
+    }
+  }
+  return Object.fromEntries([...grouped.entries()].map(([character, event]) => [character, {
+    label: event.label,
+    value: event.value,
+    from: event.from,
+    unit: event.unit,
+    evidence: event.evidence,
+  }]));
+}
+
 function extractChapterProgressStateServer(chapter = {}) {
   const text = stateTextFromChapterServer(chapter);
   const trustEvents = collectPercentEventsServer(
@@ -1214,6 +1296,7 @@ function extractChapterProgressStateServer(chapter = {}) {
     trust: trust ? { label: "刘亦菲信任度", value: trust.value, from: trust.from, evidence: trust.evidence } : null,
     backlash: backlash ? { label: "反噬值", value: backlash.value, from: backlash.from, evidence: backlash.evidence } : null,
     prediction: prediction ? { label: "预言完成度", value: prediction.value, from: prediction.from, evidence: prediction.evidence } : null,
+    characterStats: extractCharacterStatsServer(chapter),
   };
 }
 
@@ -1222,18 +1305,23 @@ function sortChaptersByIdServer(chapters = []) {
 }
 
 function progressStateCoreServer(state = {}) {
+  const characterStats = Object.fromEntries(Object.entries(state.characterStats || {}).filter(([, item]) => item?.value !== undefined && item?.value !== null));
   return {
     trust: state.trust?.value !== undefined ? state.trust : null,
     backlash: state.backlash?.value !== undefined ? state.backlash : null,
     prediction: state.prediction?.value !== undefined ? state.prediction : null,
+    characterStats,
   };
 }
 
 function mergeProgressStateServer(previous = {}, explicit = {}, chapterId = 0) {
+  const previousStats = Object.fromEntries(Object.entries(previous.characterStats || {}).map(([name, item]) => [name, { ...item, inherited: true }]));
+  const explicitStats = Object.fromEntries(Object.entries(explicit.characterStats || {}).map(([name, item]) => [name, { ...item, chapterId, inherited: false }]));
   const next = {
     trust: previous.trust ? { ...previous.trust, inherited: true } : null,
     backlash: previous.backlash ? { ...previous.backlash, inherited: true } : null,
     prediction: previous.prediction ? { ...previous.prediction, inherited: true } : null,
+    characterStats: { ...previousStats, ...explicitStats },
   };
   for (const key of ["trust", "backlash", "prediction"]) {
     if (explicit[key]?.value !== undefined && explicit[key]?.value !== null) {
@@ -1269,14 +1357,15 @@ function buildProjectProgressStateMapServer(project = {}) {
 
 function formatProgressItemServer(item) {
   if (!item || item.value === undefined || item.value === null) return "";
+  const unit = item.unit || "%";
   const value = item.from !== null && item.from !== undefined && item.from !== item.value
-    ? `${item.from}%→${item.value}%`
-    : `${item.value}%`;
+    ? `${item.from}${unit}→${item.value}${unit}`
+    : `${item.value}${unit}`;
   return `${item.label || "数值"}${value}${item.inherited ? "（承接）" : ""}`;
 }
 
 function progressStateSummaryServer(state = {}) {
-  return [state.trust, state.backlash, state.prediction]
+  return [state.trust, state.backlash, state.prediction, ...Object.values(state.characterStats || {})]
     .map(formatProgressItemServer)
     .filter(Boolean)
     .join("；");
@@ -1284,6 +1373,10 @@ function progressStateSummaryServer(state = {}) {
 
 function trustDropAllowedTextServer(text = "") {
   return /背叛|误会|失望|决裂|翻脸|信任崩塌|信任下降|信任跌|信任降低|关系破裂/.test(String(text || ""));
+}
+
+function statDropAllowedTextServer(text = "") {
+  return /消耗|下降|降低|扣除|回落|跌|归零|反噬|失败|受损|代价/.test(String(text || ""));
 }
 
 function numericRegressionIssuesServer(project = {}) {
@@ -1304,6 +1397,30 @@ function numericRegressionIssuesServer(project = {}) {
         pos: `第${chapter.id}章`,
         text: `刘亦菲信任度倒退：上一章 ${previousTrust}%，本章 ${currentTrust}%。`,
         fix: "把本章信任度改为持平或上升；如果确实要下降，先在细纲写清误会/背叛/信任崩塌的剧情原因。",
+      });
+    }
+    const previousStats = previousState.characterStats || {};
+    const currentStats = explicit.characterStats || {};
+    for (const [name, item] of Object.entries(currentStats)) {
+      const previousItem = previousStats[name];
+      if (!previousItem || previousItem.value === undefined || previousItem.value === null) continue;
+      if (item.value < previousItem.value && !statDropAllowedTextServer(context)) {
+        issues.push({
+          level: "高",
+          type: "数值连续性",
+          pos: `第${chapter.id}章`,
+          text: `${name}星运/幸运值倒退：上一章 ${previousItem.value}/100，本章 ${item.value}/100。`,
+          fix: "改成承接上一章数值或上升；如果确实要下降，先在细纲写清消耗、失败或反噬扣除原因。",
+        });
+      }
+    }
+    if (/曾黎/.test(context) && currentStats["曾黎"] && !previousStats["曾黎"] && !/曾黎[^。\n]{0,20}(?:星运值|星运指数|幸运值|气运值)|(?:星运值|星运指数|幸运值|气运值)[^。\n]{0,20}曾黎/.test(JSON.stringify(chapter.detailedOutline || ""))) {
+      issues.push({
+        level: "高",
+        type: "数值连续性",
+        pos: `第${chapter.id}章`,
+        text: `正文给曾黎写了 ${currentStats["曾黎"].value}/100，但本章细纲没有设定曾黎星运/幸运值。`,
+        fix: "要么删掉曾黎具体数值，只写线索露头；要么先在细纲系统线明确曾黎首次星运/幸运值。",
       });
     }
     previousState = currentState;
@@ -1386,7 +1503,13 @@ function extractChapterFacts(project = {}) {
       });
     }
     const progressState = progressStateMap.get(chapterId) || progressStateCoreServer(extractChapterProgressStateServer(chapter));
-    for (const [key, item] of Object.entries(progressState)) {
+    const progressItems = [
+      ["trust", progressState.trust],
+      ["backlash", progressState.backlash],
+      ["prediction", progressState.prediction],
+      ...Object.entries(progressState.characterStats || {}),
+    ];
+    for (const [key, item] of progressItems) {
       if (!item || item.value === undefined || item.value === null) continue;
       rows.push({
         projectId: project.id,
@@ -1394,7 +1517,7 @@ function extractChapterFacts(project = {}) {
         factType: "numeric_state",
         subject: `第${chapterId}章`,
         predicate: item.label || key,
-        object: `${item.value}%${item.inherited ? "（承接）" : ""}`,
+        object: `${item.value}${item.unit || "%"}${item.inherited ? "（承接）" : ""}`,
         evidence: item.evidence || progressStateSummaryServer(progressState),
         confidence: item.inherited ? 0.72 : 0.9,
         updatedAt: now,

@@ -790,6 +790,88 @@ function maxPercentEvent(events = []) {
   }, null);
 }
 
+function normalizeCharacterStatName(name = "") {
+  return characterShortName(String(name || "").replace(/[【】\[\]：:·的\s]/g, ""));
+}
+
+function isPrimaryProtagonistName(name = "") {
+  return /^(陈玄|男主|主角|宿主)$/.test(characterShortName(name));
+}
+
+function isInvalidCharacterStatName(name = "") {
+  const short = characterShortName(name);
+  return /^(目标|当前|系统|面板|检测|高星|星运|看见|显示|提示|宿主|新增|建议|数字)$/.test(short)
+    || /他|她|它|自己|看见|面板|系统|提示|目标|而|上|下/.test(short);
+}
+
+function defaultTargetCharacterForChapter(chapter = {}) {
+  const roles = outlineRoleNames(chapter.roles || [])
+    .map((role) => characterShortName(role))
+    .filter((name) => name && !isPrimaryProtagonistName(name));
+  return roles.length === 1 ? roles[0] : "";
+}
+
+function collectCharacterStatEvents(chapter = {}) {
+  const text = stateTextFromChapter(chapter);
+  const defaultTarget = defaultTargetCharacterForChapter(chapter);
+  const events = [];
+  const add = (name, value, from, index, evidence) => {
+    const character = normalizeCharacterStatName(name || defaultTarget);
+    const numeric = clampPercent(value);
+    if (!character || isInvalidCharacterStatName(character) || numeric === null) return;
+    events.push({
+      character,
+      key: "starLuck",
+      label: `${character}星运/幸运值`,
+      value: numeric,
+      from: from === null || from === undefined ? null : clampPercent(from),
+      unit: "/100",
+      index: index || 0,
+      evidence: compactMemoryText(evidence, 90),
+    });
+  };
+
+  const namedTransition = /([一-龥]{2,4})(?:[·的\s：:]){0,3}(?:星运值|星运指数|幸运值|气运值)[^。\n]{0,24}?(\d{1,3})\s*(?:\/\s*100|%)?\s*(?:→|->|—|-|~|～|至|到|涨到|升到|提升到|爬到|冲到|跳到|变成)\s*(\d{1,3})\s*(?:\/\s*100|%)?/g;
+  const namedSingle = /([一-龥]{2,4})(?:[·的\s：:]){0,3}(?:星运值|星运指数|幸运值|气运值)[^。\n]{0,18}?(\d{1,3})\s*(?:\/\s*100|%)?/g;
+  const targetTransition = /(?:目标|当前目标|目标对象)[^。\n]{0,8}(?:星运值|星运指数|幸运值|气运值)[^。\n]{0,18}?(\d{1,3})\s*(?:\/\s*100|%)?\s*(?:→|->|—|-|~|～|至|到|涨到|升到|提升到|爬到|冲到|跳到|变成)\s*(\d{1,3})\s*(?:\/\s*100|%)?/g;
+  const targetSingle = /(?:目标|当前目标|目标对象)[^。\n]{0,8}(?:星运值|星运指数|幸运值|气运值)[^。\n]{0,18}?(\d{1,3})\s*(?:\/\s*100|%)?/g;
+  const continuationSingle = /(?:星运值|星运指数|幸运值|气运值)[^。\n]{0,12}?(?:停在|显示|变成|为|是|：|:)[“"']?(\d{1,3})[”"']?\s*(?:\/\s*100|%)?/g;
+  const climbPattern = /([一-龥]{2,4})的(?:星运值|星运指数|幸运值|气运值)[^。\n]{0,24}?从\s*(\d{1,3})\s*(?:\/\s*100|%)?\s*(?:爬到|涨到|升到|到|变成)\s*(\d{1,3})\s*(?:\/\s*100|%)?/g;
+
+  for (const match of text.matchAll(namedTransition)) add(match[1], match[3], match[2], match.index, match[0]);
+  for (const match of text.matchAll(climbPattern)) add(match[1], match[3], match[2], match.index, match[0]);
+  for (const match of text.matchAll(namedSingle)) add(match[1], match[2], null, match.index, match[0]);
+  if (defaultTarget) {
+    for (const match of text.matchAll(targetTransition)) add(defaultTarget, match[2], match[1], match.index, match[0]);
+    for (const match of text.matchAll(targetSingle)) add(defaultTarget, match[1], null, match.index, match[0]);
+  }
+
+  const explicitCharacters = new Set(events.map((event) => event.character));
+  if (explicitCharacters.size === 1) {
+    const [character] = [...explicitCharacters];
+    for (const match of text.matchAll(continuationSingle)) add(character, match[1], null, match.index, match[0]);
+  }
+
+  return events.sort((a, b) => a.index - b.index);
+}
+
+function extractCharacterStats(chapter = {}) {
+  const grouped = new Map();
+  for (const event of collectCharacterStatEvents(chapter)) {
+    const previous = grouped.get(event.character);
+    if (!previous || event.value > previous.value || (event.value === previous.value && previous.from === null && event.from !== null)) {
+      grouped.set(event.character, event);
+    }
+  }
+  return Object.fromEntries([...grouped.entries()].map(([character, event]) => [character, {
+    label: event.label,
+    value: event.value,
+    from: event.from,
+    unit: event.unit,
+    evidence: event.evidence,
+  }]));
+}
+
 function extractChapterProgressState(chapter = {}) {
   const text = stateTextFromChapter(chapter);
   const trustEvents = collectPercentEvents(
@@ -815,22 +897,28 @@ function extractChapterProgressState(chapter = {}) {
     trust: trust ? { label: "刘亦菲信任度", value: trust.value, from: trust.from, evidence: trust.evidence } : null,
     backlash: backlash ? { label: "反噬值", value: backlash.value, from: backlash.from, evidence: backlash.evidence } : null,
     prediction: prediction ? { label: "预言完成度", value: prediction.value, from: prediction.from, evidence: prediction.evidence } : null,
+    characterStats: extractCharacterStats(chapter),
   };
 }
 
 function progressStateCore(state = {}) {
+  const characterStats = Object.fromEntries(Object.entries(state.characterStats || {}).filter(([, item]) => item?.value !== undefined && item?.value !== null));
   return {
     trust: state.trust?.value !== undefined ? state.trust : null,
     backlash: state.backlash?.value !== undefined ? state.backlash : null,
     prediction: state.prediction?.value !== undefined ? state.prediction : null,
+    characterStats,
   };
 }
 
 function mergeProgressState(previous = {}, explicit = {}, chapterId = 0) {
+  const previousStats = Object.fromEntries(Object.entries(previous.characterStats || {}).map(([name, item]) => [name, { ...item, inherited: true }]));
+  const explicitStats = Object.fromEntries(Object.entries(explicit.characterStats || {}).map(([name, item]) => [name, { ...item, chapterId, inherited: false }]));
   const next = {
     trust: previous.trust ? { ...previous.trust, inherited: true } : null,
     backlash: previous.backlash ? { ...previous.backlash, inherited: true } : null,
     prediction: previous.prediction ? { ...previous.prediction, inherited: true } : null,
+    characterStats: { ...previousStats, ...explicitStats },
   };
   for (const key of ["trust", "backlash", "prediction"]) {
     if (explicit[key]?.value !== undefined && explicit[key]?.value !== null) {
@@ -897,14 +985,15 @@ function refreshAllProgressStates(project = {}) {
 
 function formatProgressItem(item) {
   if (!item || item.value === undefined || item.value === null) return "";
+  const unit = item.unit || "%";
   const prefix = item.from !== null && item.from !== undefined && item.from !== item.value
-    ? `${item.from}%→${item.value}%`
-    : `${item.value}%`;
+    ? `${item.from}${unit}→${item.value}${unit}`
+    : `${item.value}${unit}`;
   return `${item.label || "数值"}${prefix}${item.inherited ? "（承接）" : ""}`;
 }
 
 function chapterProgressSummary(progressState = {}) {
-  return [progressState.trust, progressState.backlash, progressState.prediction]
+  return [progressState.trust, progressState.backlash, progressState.prediction, ...Object.values(progressState.characterStats || {})]
     .map(formatProgressItem)
     .filter(Boolean)
     .join("；");
@@ -914,11 +1003,16 @@ function trustDropAllowedText(text = "") {
   return /背叛|误会|失望|决裂|翻脸|信任崩塌|信任下降|信任跌|信任降低|关系破裂/.test(String(text || ""));
 }
 
+function statDropAllowedText(text = "") {
+  return /消耗|下降|降低|扣除|回落|跌|归零|反噬|失败|受损|代价/.test(String(text || ""));
+}
+
 function buildNumericContinuityRules(project, chapter) {
   const previous = previousChapterFor(project, chapter?.id);
   const previousState = previous ? updateChapterProgressState(project, previous) : null;
   const currentExplicit = extractChapterProgressState(chapter);
   const currentState = updateChapterProgressState(project, chapter);
+  const chapterContext = stateTextFromChapter(chapter);
   const rules = [];
   if (previousState?.trust?.value !== undefined && previousState.trust.value !== null) {
     const targetTrust = currentExplicit.trust?.value ?? currentState?.trust?.value ?? previousState.trust.value;
@@ -935,6 +1029,24 @@ function buildNumericContinuityRules(project, chapter) {
   }
   if (currentExplicit.prediction?.value !== undefined && currentExplicit.prediction.value !== null) {
     rules.push(`本章预言进度：按细纲写到 ${currentExplicit.prediction.value}%，只能用可见结果兑现，不要口头宣布完成。`);
+  }
+  const previousStats = previousState?.characterStats || {};
+  const currentStats = currentExplicit.characterStats || {};
+  for (const [name, item] of Object.entries(currentStats)) {
+    const previousItem = previousStats[name];
+    if (previousItem?.value !== undefined && previousItem.value !== null) {
+      rules.push(`人物数值锁：${name}上一章星运/幸运值为 ${previousItem.value}/100，本章不得写低于 ${previousItem.value}/100；除非细纲明确写消耗、失败或反噬扣除。`);
+      if (item.value > previousItem.value) rules.push(`本章${name}星运/幸运值推进：${previousItem.value}/100→${item.value}/100，必须由镜头反馈、事业结果、资源落袋或星运赋能造成。`);
+    } else {
+      rules.push(`人物数值首显：${name}星运/幸运值本章首次明确为 ${item.value}/100，后续章节必须承接这个数值。`);
+    }
+  }
+  for (const [name, item] of Object.entries(previousStats)) {
+    if (currentStats[name] || !chapterContext.includes(name)) continue;
+    rules.push(`人物数值承接：${name}星运/幸运值上一章为 ${item.value}/100；本章如果写到${name}的具体幸运值，必须先承接该数值，不要换成别人的数字。`);
+  }
+  if (/曾黎/.test(chapterContext) && !currentStats["曾黎"] && !previousStats["曾黎"]) {
+    rules.push("曾黎数值锁：当前只露出曾黎线索，尚未建立曾黎星运/幸运值。正文可以写“检测到成年高星运目标线索”，但禁止凭空写曾黎具体幸运值；首次给值必须在细纲系统线里明确。");
   }
   return rules;
 }
@@ -959,6 +1071,28 @@ function numericContinuityIssues(project, chapter, text = "", currentDetailText 
       level: "高",
       text: `信任度倒退：上一章刘亦菲信任度为 ${previousState.trust.value}%，本章写成 ${currentValue}%。`,
       fix: "改成本章信任度持平或上升；如果确实要下降，必须先在细纲写清误会/背叛/信任崩塌的剧情原因。",
+    });
+  }
+  const previousStats = previousState.characterStats || {};
+  const currentStats = currentTextState.characterStats || {};
+  for (const [name, item] of Object.entries(currentStats)) {
+    const previousItem = previousStats[name];
+    if (!previousItem || previousItem.value === undefined || previousItem.value === null) continue;
+    if (item.value < previousItem.value && !statDropAllowedText(allowedContext)) {
+      issues.push({
+        type: "数值连续性",
+        level: "高",
+        text: `${name}星运/幸运值倒退：上一章为 ${previousItem.value}/100，本章写成 ${item.value}/100。`,
+        fix: "改成承接上一章数值或上升；如果确实要下降，先在细纲写清消耗、失败或反噬扣除原因。",
+      });
+    }
+  }
+  if (/曾黎/.test(allowedContext) && currentStats["曾黎"] && !previousStats["曾黎"] && !/曾黎[^。\n]{0,20}(?:星运值|星运指数|幸运值|气运值)|(?:星运值|星运指数|幸运值|气运值)[^。\n]{0,20}曾黎/.test(currentDetailText)) {
+    issues.push({
+      type: "数值连续性",
+      level: "高",
+      text: `正文给曾黎写了 ${currentStats["曾黎"].value}/100，但本章细纲没有设定曾黎星运/幸运值。`,
+      fix: "要么删掉曾黎具体数值，只写线索露头；要么先在细纲系统线明确曾黎首次星运/幸运值。",
     });
   }
   return issues;
@@ -2097,7 +2231,7 @@ function buildLiuyifeiEarlyOutline(row, chapterNumber, goldFingerPowers = []) {
       scenes: [
         { title: "第一场七次卡", words: 700, content: "刘亦菲第一场戏被导演喊了七次卡。她眼睛红了，去洗手间待五分钟，出来继续拍。陈玄没进片场，只在外面看通告时间。", systemLines: [] },
         { title: "不出现的护航", words: 500, content: "陈玄每天早晨买好水和热包子，托剧务放在她能拿到的位置。他不说是自己送的，只确保她不会饿着上戏。", systemLines: ["【事业型羁绊稳定】", "→ 目标事业消耗降低"] },
-        { title: "镜头第一次记住她", words: 600, content: "摄影师临时多给刘亦菲一个近景。她照陈玄说的那样不装别人，安静站住。监视器前有人停下，问这个新人叫什么。", systemLines: ["【镜头记忆点形成】", "→ 星运值短暂上浮"] },
+        { title: "镜头第一次记住她", words: 600, content: "摄影师临时多给刘亦菲一个近景。她照陈玄说的那样不装别人，安静站住。监视器前有人停下，问这个新人叫什么。", systemLines: ["【镜头记忆点形成】", "→ 刘亦菲星运值：34→42"] },
         { title: "关系边界", words: 400, content: "刘亦菲下戏后想找陈玄道谢，陈玄只在巷口把热水递给她母亲。他清楚她未成年，所有帮助都只能落在事业和安全上。", systemLines: [] },
       ],
       hook: "当天夜里，系统提示三个月后下一次反噬需要新的成年高星运目标。",
@@ -2110,7 +2244,7 @@ function buildLiuyifeiEarlyOutline(row, chapterNumber, goldFingerPowers = []) {
         { title: "通告单改名", words: 550, content: "通告单上刘亦菲的名字从靠后挪到前面。场务说是导演临时调整，旁边几个演员都看了一眼。", systemLines: [] },
         { title: "小范围出圈", words: 550, content: "监视器前，摄影师和副导演讨论她的脸适合给近景。陈玄没有进去，只从剧务口中听到这句，知道第一步已经成了。", systemLines: ["【事业反馈确认】", "→ 高星运目标曝光机会增加"] },
         { title: "规则不是玄学", words: 500, content: "陈玄拿着通告单，第一次意识到娱乐圈不是只靠预言，座次、镜头、合同、宣发每一项都能改变命运。", systemLines: [] },
-        { title: "新线索露头", words: 600, content: "夜里他在报纸上看到中戏演员饭局消息，曾黎的名字露出来。系统只闪了一下，就给出成年高星运目标提示。", systemLines: ["【检测到成年高星运目标线索】", "→ 曾黎", "→ 可缓解下一阶段反噬"] },
+        { title: "新线索露头", words: 600, content: "夜里他在报纸上看到中戏演员饭局消息，曾黎的名字露出来。系统只闪了一下，就给出成年高星运目标提示。", systemLines: ["【检测到成年高星运目标线索】", "→ 曾黎", "→ 曾黎星运值未解锁，首次见面前不写具体幸运值", "→ 可缓解下一阶段反噬"] },
       ],
       hook: "陈玄还没见到曾黎，反噬倒计时已经开始重新计数。",
     },
