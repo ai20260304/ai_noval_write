@@ -1208,6 +1208,53 @@ function characterShortNameServer(name = "") {
   return text.split(/[／/、\s·｜|()（）-]/).filter(Boolean)[0] || text;
 }
 
+function isEarlyLiuyifeiChapterServer(project = {}, chapter = {}) {
+  const detail = chapter.detailedOutline && typeof chapter.detailedOutline === "object" && !Array.isArray(chapter.detailedOutline)
+    ? chapter.detailedOutline
+    : {};
+  return /娱乐圈|女星|演员|明星/.test(`${project.title || ""}${project.genre || ""}${project.logline || ""}`)
+    && Number(chapter.id || 0) <= 7
+    && /刘亦菲/.test(`${chapter.title || ""}${chapter.outline || ""}${detail.core || ""}${detail.sourceNode || ""}`);
+}
+
+function unsupportedContinuityFactIssuesServer(project = {}, chapter = {}) {
+  const text = String(chapter.manuscript || "");
+  if (!text) return [];
+  const chapters = project.chapters || [];
+  const currentId = Number(chapter.id || 0);
+  const previous = chapters
+    .filter((item) => Number(item.id || 0) < currentId)
+    .sort((a, b) => Number(a.id || 0) - Number(b.id || 0))
+    .at(-1);
+  const allowedContext = [
+    previous?.manuscript,
+    previous?.memorySummary,
+    previous?.endingSnapshot,
+    JSON.stringify(previous?.detailedOutline || ""),
+    JSON.stringify(chapter.detailedOutline || ""),
+    chapter.outline,
+  ].filter(Boolean).join("\n");
+  const issues = ["胎记", "伤疤", "疤痕", "血缘秘密", "家庭秘密", "初吻", "私生子"]
+    .filter((word) => text.includes(word) && !allowedContext.includes(word))
+    .map((word) => ({
+      level: "高",
+      type: "事实",
+      pos: `第${chapter.id}章`,
+      text: `正文新增了前文和细纲没有支撑的私密事实：${word}。`,
+      fix: "删除凭空新增事实，改用已出现的报纸、选角通告、电话预言、试镜结果等连续性证据。",
+    }));
+  if (isEarlyLiuyifeiChapterServer(project, chapter) && /十块钱|10块|三十块钱|30块/.test(text)) {
+    issues.push({
+      level: "高",
+      type: "事实",
+      pos: `第${chapter.id}章`,
+      text: "刘亦菲前 7 章金额设定被改写：当前固定为七块钱，不应出现十块/三十块。",
+      fix: "把算命费、补钱、玩笑金额统一改成七块钱；无关价格改成不写具体数额。",
+    });
+  }
+  return issues;
+}
+
 function extractCharacterStates(project = {}) {
   const rows = [];
   const now = new Date().toISOString();
@@ -1505,6 +1552,7 @@ function regressionIssuesForProject(project = {}) {
     if (missingRoles.length) {
       issues.push({ level: "中", type: "角色", pos: `第${chapter.id}章`, text: `计划角色未落正文：${missingRoles.slice(0, 3).join("、")}。`, fix: "补出场动作/台词，或调整章节角色计划。" });
     }
+    issues.push(...unsupportedContinuityFactIssuesServer(project, chapter));
   }
   const states = db.prepare("SELECT character_name, COUNT(*) AS count FROM character_states WHERE project_id = ? GROUP BY character_name").all(project.id);
   for (const character of (project.characters || []).slice(0, 80)) {

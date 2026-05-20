@@ -206,8 +206,8 @@ const DEFAULT_STYLE_SAMPLE = `她没有哭，也没有解释。
 可她只是把那份合同推回去，语气很轻：“这次，该你们求我了。”`;
 
 const CURRENT_RUBRIC_METHOD = "local-rubric-v3";
-const CURRENT_PROJECT_PLAN_VERSION = 2;
-const CURRENT_DETAIL_OUTLINE_VERSION = 3;
+const CURRENT_PROJECT_PLAN_VERSION = 3;
+const CURRENT_DETAIL_OUTLINE_VERSION = 4;
 
 const DEFAULT_STYLE_TAGS = [
   "语言风趣",
@@ -612,11 +612,42 @@ function refreshProjectStoryMemory(project, chapter = null) {
   return memory;
 }
 
+function isEarlyLiuyifeiChapter(project, chapter) {
+  const detail = chapter?.detailedOutline && !Array.isArray(chapter.detailedOutline) ? chapter.detailedOutline : {};
+  return isEntertainmentProject(project)
+    && Number(chapter?.id || 0) <= 7
+    && /刘亦菲/.test(`${chapter?.title || ""}${chapter?.outline || ""}${detail.core || ""}${detail.sourceNode || ""}`);
+}
+
+function factualContinuityRules(project, chapter) {
+  const previous = previousChapterFor(project, chapter?.id);
+  const previousContext = [
+    previous?.manuscript,
+    previous?.memorySummary,
+    JSON.stringify(previous?.detailedOutline || ""),
+  ].filter(Boolean).join("\n");
+  const detailContext = JSON.stringify(chapter?.detailedOutline || "");
+  const privateFactWords = ["胎记", "伤疤", "疤痕", "血缘秘密", "家庭秘密", "初吻", "私生子"];
+  const unsupportedPrivateFacts = privateFactWords
+    .filter((word) => !previousContext.includes(word) && !detailContext.includes(word))
+    .join("、");
+  const rules = [];
+  if (unsupportedPrivateFacts) {
+    rules.push(`事实锁定：上一章正文和本章细纲没有写到的私密验证点禁止新增，尤其不能凭空写：${unsupportedPrivateFacts}。需要增强信任时，只能使用已经出现的报纸、选角通告、演员路、电话、试镜结果等事实。`);
+  }
+  if (isEarlyLiuyifeiChapter(project, chapter)) {
+    rules.push("刘亦菲前 7 章金额锁定：陈玄开局兜里只有七块钱；刘亦菲补算命费也只能写七块钱。禁止写十块钱、10块钱、三十块钱或临时改价。");
+    rules.push("刘亦菲前 7 章信任来源锁定：信任来自报纸、演员路、北京电影学院/试镜电话等事业结果，不来自胎记、身体隐私、家庭秘密或成人暧昧。");
+  }
+  return rules;
+}
+
 function buildChapterGenerationContract(project, chapter) {
   const targetWords = activeTargetWords(project, chapter);
   const band = generationWordBand(targetWords);
   const goldFingerRules = buildGoldFingerRules(project);
   const continuity = buildChapterContinuityMemory(project, chapter);
+  const factRules = factualContinuityRules(project, chapter);
   return [
     `正文目标 ${band.target} 字，合格区间 ${band.min}-${band.max} 字。`,
     "只输出小说正文，不输出粗纲、细纲、写法说明、规则复述或分析文字。",
@@ -628,6 +659,7 @@ function buildChapterGenerationContract(project, chapter) {
     continuity.previousEnding ? `开篇落点：第一场必须处理“${continuity.previousEnding}”留下的结果、人物位置或未解决压力。` : "",
     "前 300 字必须先接住上一章结果、余波或人物状态，再写本章新推进。",
     "禁止把每章写成独立短篇；不要跳过上一章结尾直接开新事件。",
+    ...factRules,
     "每段都落在人物动作、对话、心理选择、关系变化或结果变化上，少解释，少静态陈设。",
     ...(goldFingerRules.length ? [`金手指必须有操作感：${goldFingerRules.join("；")}`] : []),
   ].filter(Boolean);
@@ -1775,7 +1807,7 @@ function buildLiuyifeiEarlyOutline(row, chapterNumber, goldFingerPowers = []) {
       core: "反噬升级 → 刘亦菲再次出现 → 七块钱算命费 → 三天内试镜电话预言",
       opening: "刘亦菲走后，陈玄盯着30%的反噬值，脑子飞快转。他必须让她真正相信自己。",
       scenes: [
-        { title: "反噬升级", words: 600, content: "晚上十点反噬值跳到50%。系统提示高星运目标信任度越高，反噬增长越慢。陈玄回想刘亦菲离开前那句“等我爸回来”，知道这还不是信任。", systemLines: ["【反噬值：50%】", "→ 高星运目标信任不足", "→ 剩余时间：48小时"] },
+        { title: "反噬升级", words: 600, content: "晚上十点反噬值跳到50%。系统提示高星运目标信任度越高，反噬增长越慢。陈玄回想刘亦菲离开前那句“跟我妈说一声”，知道这还不是信任。", systemLines: ["【反噬值：50%】", "→ 高星运目标信任不足", "→ 剩余时间：48小时"] },
         { title: "她又来了", words: 750, content: "第二天中午，刘亦菲拿着赵薇小燕子的海报再来。她说同学和母亲都觉得她做梦。陈玄没有安慰，只把2002年、北京电影学院、被导演看中这些结果摆出来。", systemLines: [] },
         { title: "七块钱落桌", words: 450, content: "刘亦菲从兜里掏出七块钱，说昨天忘给算命费。陈玄看到钱就笑了。系统提示信任度从10%涨到35%，反噬速度减缓。", systemLines: ["【信任度：10%→35%】", "→ 反噬值增长速度减缓", "→ 当前反噬：65%"] },
         { title: "关键预言发动", words: 500, content: "周五晚上，陈玄去老小区楼下找她。她在路灯下背剧本。他告诉她《金粉世家》剧组会在三天内打电话。刘亦菲攥紧剧本，说她信。", systemLines: ["【信任度：35%→55%】", "→ 触发中级羁绊：星运共鸣"] },
@@ -4285,6 +4317,36 @@ function draftStyleMetrics(text = "") {
   };
 }
 
+function unsupportedContinuityFactIssues(project, chapter, text = "", currentDetailText = "") {
+  const previous = previousChapterFor(project, chapter?.id);
+  const previousContext = [
+    previous?.manuscript,
+    previous?.memorySummary,
+    previous?.endingSnapshot,
+    JSON.stringify(previous?.detailedOutline || ""),
+  ].filter(Boolean).join("\n");
+  const allowedContext = `${previousContext}\n${currentDetailText}\n${chapter?.outline || ""}`;
+  const privateFacts = ["胎记", "伤疤", "疤痕", "血缘秘密", "家庭秘密", "初吻", "私生子"];
+  const issues = privateFacts
+    .filter((word) => text.includes(word) && !allowedContext.includes(word))
+    .map((word) => ({
+      type: "事实",
+      level: "高",
+      text: `正文新增了前文和细纲没有支撑的私密事实：${word}。`,
+      fix: "删除该私密事实，改用已出现的报纸、选角通告、电话预言、试镜结果等连续性证据。",
+    }));
+
+  if (isEarlyLiuyifeiChapter(project, chapter) && /十块钱|10块|三十块钱|30块/.test(text)) {
+    issues.push({
+      type: "事实",
+      level: "高",
+      text: "刘亦菲前 7 章金额设定被改写：当前固定为七块钱，不应出现十块/三十块。",
+      fix: "把算命费、补钱、玩笑金额统一改成七块钱；无关价格改成不写具体数额。",
+    });
+  }
+  return issues;
+}
+
 function auditChapterDraft(project, chapter) {
   const targetWords = activeTargetWords(project, chapter);
   const hardMin = 2200;
@@ -4333,6 +4395,7 @@ function auditChapterDraft(project, chapter) {
   if (missingClues.length) {
     issues.push({ type: "伏笔", level: "中", text: `伏笔未落到正文：${missingClues.join("、")}。`, fix: "补一处物件、提示框、台词或结果。" });
   }
+  issues.push(...unsupportedContinuityFactIssues(project, chapter, text, currentDetailText));
   if (!/[？?。！!][\s\S]{0,120}$/.test(text)) {
     issues.push({ type: "钩子", level: "中", text: "结尾钩子不够明确。", fix: "用新问题、反噬提示、电话、门外来人或资源变化收尾。" });
   }
