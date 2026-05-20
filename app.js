@@ -1565,6 +1565,69 @@ function buildChapterGenerationPrompt(project, chapter, detail) {
   ].filter(Boolean).join("\n");
 }
 
+function formatReviewIssueForPrompt(issue, index) {
+  return [
+    `${index + 1}. 【${issue.type || "问题"} / ${issue.level || "中"}】${issue.text || "未描述"}`,
+    `   修法：${issue.fix || "按审查要求修正，并保持正文连续。"}`,
+  ].join("\n");
+}
+
+function buildChapterFixPrompt(project, chapter, issues = []) {
+  refreshProjectStoryMemory(project, chapter);
+  const detail = normalizeDraftOutline(project, chapter);
+  const contract = buildChapterGenerationContract(project, chapter);
+  const continuity = buildChapterContinuityMemory(project, chapter);
+  const goldFingerRules = buildGoldFingerRules(project);
+  const fixPlan = buildChapterFixPlan(chapter);
+  const targetWords = activeTargetWords(project, chapter);
+  const manuscript = cleanGeneratedDraft(chapter.manuscript || "");
+  const detailText = JSON.stringify(detail || {}, null, 2);
+
+  return [
+    `你是中文网文商业修稿模型。请按审查问题修订《${project.title}》第 ${chapter.id} 章《${chapter.title}》。`,
+    "",
+    "【输出规则】",
+    "只输出修订后的小说正文，不输出标题、解释、列表、审查报告、修改说明或 Markdown 代码块。",
+    "这是修稿任务，不是重新开一章。保留已经成立的剧情顺序、人物认知、数值状态和章末承接，只修有问题的地方。",
+    `目标字数：${targetWords} 字左右，硬性合格区间 2200-3000 字，优先落在 2400-2800 字。`,
+    "必须逐项修复下面所有审查问题；如果某一项需要删情节，就用细纲内已有事实补足，不要凭空新增胎记、秘密、金额、亲密桥段或未铺垫设定。",
+    "",
+    "【本次必须修复】",
+    ...(issues.length ? issues.map(formatReviewIssueForPrompt) : ["无明确问题时，仅做轻度去 AI 味和连续性校准。"]),
+    "",
+    ...(fixPlan.length ? ["【90 分路线】", ...fixPlan, ""] : []),
+    "【硬性生成约束】",
+    ...contract,
+    "",
+    "【连续性记忆】",
+    ...(continuity.carry.length ? continuity.carry : ["上一章结尾：无"]),
+    "",
+    "【本章粗纲】",
+    chapter.outline || detail?.core || chapter.title,
+    "",
+    "【本章细纲 JSON】",
+    detailText,
+    "",
+    "【必须出场角色】",
+    (chapter.roles || []).join("、") || "按细纲安排",
+    "",
+    "【文风规则】",
+    ...(combinedGenerationRules(project).length ? combinedGenerationRules(project) : ["番茄小白文，句子直给，少作者腔。"]),
+    "",
+    "【去 AI 味修稿重点】",
+    "删掉静态场景物品清单，只保留会改变人物选择的 1-2 个细节；篇幅让给人物欲望、顾虑、心理拉扯、行动和台词。",
+    "心理活动要和下一步动作绑定：怕丢脸、怕没钱、怕错过机会、想翻身、想保护对方，都要推动人物做选择。",
+    "信息必须放进争执、交易、电话、通告、试镜、合同、系统面板或现场反馈里，不要站在原地解释设定。",
+    "每个场景至少有一个结果变化：信任、资源、反噬、星运、身体强化、赋能收益、角色边界或下一章压力。",
+    "",
+    "【金手指设定】",
+    ...(goldFingerRules.length ? goldFingerRules : ["预言系统：短期事件预知，必须有消耗、代价和结果回收。"]),
+    "",
+    "【当前正文】",
+    manuscript,
+  ].filter(Boolean).join("\n");
+}
+
 function routeForTask(taskName = "章节正文") {
   return state.routes.find((route) => route.task === taskName)
     || state.routes.find((route) => route.task.includes(taskName) || taskName.includes(route.task))
@@ -1646,7 +1709,7 @@ function recordLlmUsage(project, chapter, result) {
   }).slice(-50);
 }
 
-async function callChapterModel(project, chapter, prompt, targetWords) {
+async function callChapterModel(project, chapter, prompt, targetWords, task = "章节正文") {
   await saveState("before-llm-generate");
   const response = await fetch("/api/llm/generate", {
     method: "POST",
@@ -1654,7 +1717,7 @@ async function callChapterModel(project, chapter, prompt, targetWords) {
     body: JSON.stringify({
       projectId: project.id,
       chapterId: chapter.id,
-      task: "章节正文",
+      task,
       targetWords,
       prompt,
     }),
@@ -1672,7 +1735,7 @@ async function callChapterModel(project, chapter, prompt, targetWords) {
 function statusClass(status) {
   if (["完成", "已连接", "启用", "已训练", "已审查", "模型列表可用"].includes(status)) return "done";
   if (["待修", "需审查", "高", "不通过", "连接失败", "样章已更新"].includes(status)) return "risk";
-  if (["进行中", "写作中", "训练中", "审查中", "测试中"].includes(status)) return "doing";
+  if (["进行中", "写作中", "训练中", "审查中", "测试中", "修稿中"].includes(status)) return "doing";
   return "wait";
 }
 
@@ -1718,17 +1781,18 @@ function setGenerationProgress(percent, title, detail, { running = true, failed 
   }
 }
 
-function startGenerationProgress(route, chapter, targetWords) {
+function startGenerationProgress(route, chapter, targetWords, mode = "生成") {
   window.clearInterval(generationProgressTimer);
   generationProgressStartedAt = Date.now();
   generationProgressValue = 5;
   const modelText = route ? `${route.provider} / ${route.model}` : "已配置模型";
-  setGenerationProgress(5, "准备生成", `第 ${chapter.id} 章，目标 ${targetWords} 字，模型 ${modelText}`);
+  const isFix = mode.includes("修");
+  setGenerationProgress(5, isFix ? "准备修稿" : "准备生成", `第 ${chapter.id} 章，目标 ${targetWords} 字，模型 ${modelText}`);
   generationProgressTimer = window.setInterval(() => {
     const elapsed = Date.now() - generationProgressStartedAt;
     const ceiling = elapsed > 90000 ? 92 : elapsed > 45000 ? 88 : 82;
     const next = Math.min(ceiling, generationProgressValue + (elapsed > 45000 ? 1 : 2));
-    setGenerationProgress(next, "等待模型返回", `模型正在生成正文，已等待 ${formatElapsed(elapsed)}。长章节通常需要 60-120 秒。`);
+    setGenerationProgress(next, "等待模型返回", `模型正在${isFix ? "按审查问题修订正文" : "生成正文"}，已等待 ${formatElapsed(elapsed)}。长章节通常需要 60-120 秒。`);
   }, 3500);
 }
 
@@ -3644,6 +3708,7 @@ function selectChapter(id) {
     resetGenerationProgress();
     markDetailOutlineDirty(false);
     renderChapterScore(null);
+    updateWorkflowButtons(null);
     return;
   }
 
@@ -3709,9 +3774,11 @@ function renderChapterScore(chapter) {
 function updateWorkflowButtons(chapter) {
   const hasChapter = Boolean(chapter);
   const isDone = chapter?.status === "完成";
+  const isFixing = chapter?.status === "修稿中";
   const isReview = chapter && isReviewChapter(chapter);
   const submitButton = $("#submit-review");
   const completeButton = $("#complete-chapter");
+  const fixButton = $("#auto-fix-chapter");
   submitButton.hidden = isDone;
   completeButton.hidden = isDone;
   submitButton.disabled = !hasChapter || isDone;
@@ -3719,6 +3786,20 @@ function updateWorkflowButtons(chapter) {
   completeButton.disabled = !hasChapter || isDone;
   $("#submit-review span").textContent = isReview ? "重新送审" : "送审";
   $("#score-chapter span").textContent = isDone ? "重新打分" : isReview ? "重新审查" : "审查打分";
+  if (fixButton) {
+    const issueCount = Array.isArray(chapter?.reviewIssues) ? chapter.reviewIssues.length : 0;
+    const hasText = hasChapter && String(chapter?.manuscript || $("#manuscript")?.value || "").trim();
+    fixButton.disabled = !hasChapter || !hasText || isFixing;
+    fixButton.classList.toggle("is-running", isFixing);
+    const label = $("#auto-fix-chapter span");
+    if (label) {
+      label.textContent = isFixing
+        ? "修稿中"
+        : issueCount
+          ? `按 ${issueCount} 项修稿`
+          : "按问题修稿";
+    }
+  }
 }
 
 function renderStyleTagEditor(project = currentProject()) {
@@ -5289,6 +5370,172 @@ function scoreCurrentChapter() {
   }
 }
 
+function updateProjectScoreSummary(project) {
+  const scores = project.chapters.filter((item) => item.score).map((item) => item.score);
+  if (scores.length) {
+    project.averageScore = Math.round(scores.reduce((sum, value) => sum + value, 0) / scores.length);
+  }
+}
+
+async function autoFixCurrentChapter() {
+  const project = currentProject();
+  const chapter = selectedChapter();
+  if (!chapter) {
+    showToast("当前项目还没有章节，先导入大纲并拆章。");
+    return;
+  }
+
+  const currentText = cleanGeneratedDraft($("#manuscript").value || "");
+  if (!currentText.trim()) {
+    showToast("正文为空，无法按审查问题修稿。");
+    return;
+  }
+
+  const taskName = "去 AI 味改写";
+  const targetWords = activeTargetWords(project, chapter);
+  const route = routeForTask(taskName);
+  const previousStatus = chapter.status;
+  const previousText = chapter.manuscript || "";
+  const textBeforeModel = currentText;
+  const previousMeta = chapter.llmMeta;
+  const previousError = chapter.llmError;
+  const startedAt = new Date().toISOString();
+
+  if (previousText !== currentText) {
+    recordManualStyleRevision(project, chapter, previousText, currentText);
+  }
+  chapter.manuscript = currentText;
+  chapter.wordCount = chapterWordCount(chapter.manuscript);
+  updateChapterProgressState(project, chapter);
+
+  const auditBefore = auditChapterDraft(project, chapter);
+  chapter.scoreDetail = auditBefore.detail;
+  chapter.score = auditBefore.score;
+  chapter.scoreMeta = auditBefore.meta;
+  chapter.reviewIssues = auditBefore.issues;
+  chapter.reviewPassed = auditBefore.passed;
+  chapter.scoreNotes = auditBefore.notes;
+  chapter.reviewedAt = startedAt;
+  updateProjectScoreSummary(project);
+
+  if (!auditBefore.issues.length) {
+    chapter.status = previousStatus === "完成" ? "完成" : "已审查";
+    chapter.progress = previousStatus === "完成" ? 100 : Math.min(99, Math.round((chapter.wordCount / targetWords) * 100));
+    refreshChapterStorySnapshot(project, chapter);
+    refreshProjectStoryMemory(project, chapter);
+    selectChapter(chapter.id);
+    saveStateSoon("auto-fix-no-issues");
+    showToast(`第 ${chapter.id} 章当前没有审查问题，无需调用模型修稿。`);
+    return;
+  }
+
+  const fixButton = $("#auto-fix-chapter");
+  const fixLabel = $("#auto-fix-chapter span");
+  const previousButtonText = fixLabel?.textContent || "按问题修稿";
+  if (fixButton) {
+    fixButton.disabled = true;
+    fixButton.classList.add("is-running");
+  }
+  if (fixLabel) fixLabel.textContent = "修稿中";
+
+  chapter.status = "修稿中";
+  chapter.autoFixPrompt = buildChapterFixPrompt(project, chapter, auditBefore.issues);
+  chapter.autoFixStartedAt = startedAt;
+  startGenerationProgress(route, chapter, targetWords, "修稿");
+  showToast(route ? `正在调用 ${route.provider} / ${route.model} 按 ${auditBefore.issues.length} 项问题修稿...` : "正在调用模型按审查问题修稿...");
+
+  try {
+    setGenerationProgress(20, "整理修稿指令", `已读取 ${auditBefore.issues.length} 项审查问题、细纲、连续性记忆和文风规则。`);
+    await new Promise((resolve) => window.setTimeout(resolve, 80));
+    setGenerationProgress(36, "发送模型请求", route ? `已向 ${route.provider} / ${route.model} 发送修稿请求。` : "已向修稿模型发送请求。");
+    const result = await callChapterModel(project, chapter, chapter.autoFixPrompt, targetWords, taskName);
+    setGenerationProgress(88, "模型已返回", "正在清理正文、重新审查并保存。");
+
+    const revised = trimDraftToWordLimit(cleanGeneratedDraft(result.text), 3000);
+    if (!revised.trim()) throw new Error("模型返回的修订正文为空");
+
+    recordLlmUsage(project, chapter, result);
+    chapter.manuscript = revised;
+    chapter.autoFixAppliedAt = new Date().toISOString();
+    chapter.autoFixIssueCount = auditBefore.issues.length;
+    chapter.autoFixHistory = (chapter.autoFixHistory || []).concat({
+      at: chapter.autoFixAppliedAt,
+      task: result.task || taskName,
+      issueCount: auditBefore.issues.length,
+      scoreBefore: auditBefore.score,
+      wordCountBefore: auditBefore.meta.wordCount,
+      route: `${result.provider || route?.provider || ""} / ${result.model || route?.model || ""}`.trim(),
+    }).slice(-10);
+    chapter.manualStyleEdited = false;
+    chapter.styleRevisionStatus = "模型按审查问题修稿";
+    chapter.wordCount = chapterWordCount(chapter.manuscript);
+    updateChapterProgressState(project, chapter);
+    refreshChapterStorySnapshot(project, chapter);
+    const nextChapter = nextChapterFor(project, chapter.id);
+    if (nextChapter) refreshProjectStoryMemory(project, nextChapter);
+    refreshProjectStoryMemory(project, chapter);
+
+    const auditAfter = auditChapterDraft(project, chapter);
+    chapter.scoreDetail = auditAfter.detail;
+    chapter.score = auditAfter.score;
+    chapter.scoreMeta = auditAfter.meta;
+    chapter.reviewIssues = auditAfter.issues;
+    chapter.reviewPassed = auditAfter.passed;
+    chapter.scoreNotes = auditAfter.notes;
+    chapter.reviewedAt = new Date().toISOString();
+    chapter.autoFixHistory[chapter.autoFixHistory.length - 1].scoreAfter = auditAfter.score;
+    chapter.autoFixHistory[chapter.autoFixHistory.length - 1].wordCountAfter = auditAfter.meta.wordCount;
+    chapter.status = previousStatus === "完成" && auditAfter.passed ? "完成" : (auditAfter.passed ? "已审查" : "待修");
+    chapter.progress = chapter.status === "完成" ? 100 : Math.min(99, Math.round((chapter.wordCount / targetWords) * 100));
+    project.words = projectWordCount(project);
+    updateProjectScoreSummary(project);
+    project.health.audit = Math.min((project.health.audit || 0) + 10, 100);
+    state.activeChapterFilter = chapter.status === "完成" ? "done" : "review";
+    state.activeChapterId = chapter.id;
+
+    $("#manuscript").value = chapter.manuscript;
+    renderAll();
+    switchPage("writer");
+    selectChapter(chapter.id);
+    saveStateSoon("auto-fix-chapter");
+    finishGenerationProgress(`修稿完成：${chapterWordCount(chapter.manuscript)}/${targetWords} 字，评分 ${chapter.score} 分，剩余 ${chapter.reviewIssues.length} 项问题。`);
+    showToast(auditAfter.issues.length
+      ? `第 ${chapter.id} 章已修稿并重评：${chapter.score} 分，仍有 ${auditAfter.issues.length} 项需修。`
+      : `第 ${chapter.id} 章已按问题修稿并通过审查：${chapter.score} 分。`);
+  } catch (error) {
+    chapter.manuscript = textBeforeModel;
+    chapter.llmError = error.message || "模型修稿失败";
+    chapter.llmMeta = {
+      ...(previousMeta || {}),
+      source: "error",
+      task: taskName,
+      error: chapter.llmError,
+      calledAt: new Date().toISOString(),
+    };
+    if (!previousMeta) delete chapter.llmMeta.provider;
+    chapter.status = previousStatus;
+    chapter.wordCount = chapterWordCount(chapter.manuscript);
+    chapter.llmPreviousError = previousError || "";
+    updateChapterProgressState(project, chapter);
+    refreshChapterStorySnapshot(project, chapter);
+    refreshProjectStoryMemory(project, chapter);
+    $("#manuscript").value = chapter.manuscript;
+    selectChapter(chapter.id);
+    saveStateSoon("auto-fix-error");
+    failGenerationProgress(chapter.llmError);
+    showToast(`模型修稿失败，正文未改动：${chapter.llmError}`);
+  } finally {
+    const latestButton = $("#auto-fix-chapter");
+    const latestLabel = $("#auto-fix-chapter span");
+    if (latestButton) {
+      latestButton.classList.remove("is-running");
+      latestButton.disabled = false;
+    }
+    if (latestLabel) latestLabel.textContent = previousButtonText;
+    updateWorkflowButtons(selectedChapter());
+  }
+}
+
 async function completeCurrentChapter() {
   const project = currentProject();
   const chapter = selectedChapter();
@@ -5340,6 +5587,9 @@ function normalizeDraftOutline(project, chapter) {
 
 function cleanGeneratedDraft(text) {
   return String(text || "")
+    .replace(/^```(?:\w+)?\s*/i, "")
+    .replace(/```\s*$/i, "")
+    .replace(/^(?:修订后正文|修改后正文|正文)[:：]\s*/i, "")
     .replace(/这一段细纲对应的是：?.*?(?:\n|$)/g, "")
     .replace(/写法上[^。\n]*[。\n]?/g, "")
     .replace(/粗纲节点[:：][^。\n]*[。\n]?/g, "")
@@ -5902,6 +6152,7 @@ Object.assign(window, {
   generateCopy,
   submitCurrentChapterForReview,
   scoreCurrentChapter,
+  autoFixCurrentChapter,
   completeCurrentChapter,
   saveCurrentManuscript,
   saveCurrentDetailOutline,
@@ -5912,6 +6163,7 @@ function runWriterCommand(commandName) {
     "generate-copy": generateCopy,
     "submit-review": submitCurrentChapterForReview,
     "score-chapter": scoreCurrentChapter,
+    "auto-fix-chapter": autoFixCurrentChapter,
     "complete-chapter": completeCurrentChapter,
     "save-manuscript": saveCurrentManuscript,
   };
