@@ -1132,6 +1132,45 @@ function clampPercentServer(value) {
   return Math.max(0, Math.min(100, Math.round(number)));
 }
 
+function parseChineseIntegerServer(value = "") {
+  const text = String(value || "").replace(/\s+/g, "").replace(/[点.].*$/, "");
+  if (!text) return null;
+  const digitMap = { 零: 0, 〇: 0, 一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9 };
+  if (/^\d+$/.test(text)) return Number(text);
+  if (!/^[零〇一二两三四五六七八九十百]+$/.test(text)) return null;
+  let section = 0;
+  let current = null;
+  for (const char of text) {
+    if (Object.prototype.hasOwnProperty.call(digitMap, char)) {
+      current = digitMap[char];
+    } else if (char === "十") {
+      section += (current === null ? 1 : current) * 10;
+      current = null;
+    } else if (char === "百") {
+      section += (current === null ? 1 : current) * 100;
+      current = null;
+    }
+  }
+  return section + (current || 0);
+}
+
+function parseScoreValueServer(value) {
+  const raw = String(value ?? "").trim().replace(/[，,]/g, "");
+  if (!raw) return null;
+  const number = /^\d+$/.test(raw) ? Number(raw) : parseChineseIntegerServer(raw);
+  if (!Number.isFinite(number)) return null;
+  const rounded = Math.round(number);
+  return {
+    raw,
+    value: rounded,
+    valid: rounded >= 0 && rounded <= 100,
+  };
+}
+
+function scoreDisplayServer(raw, value) {
+  return String(raw) === String(value) ? String(value) : `${raw}（解析为 ${value}）`;
+}
+
 function stateTextFromChapterServer(chapter = {}) {
   const detail = chapter.detailedOutline && typeof chapter.detailedOutline === "object" && !Array.isArray(chapter.detailedOutline)
     ? chapter.detailedOutline
@@ -1200,7 +1239,7 @@ function isPrimaryProtagonistNameServer(name = "") {
 function isInvalidCharacterStatNameServer(name = "") {
   const short = characterShortNameServer(name);
   return /^(目标|当前|系统|面板|检测|高星|星运|看见|显示|提示|宿主|新增|建议|数字)$/.test(short)
-    || /他|她|它|自己|看见|面板|系统|提示|目标|而|上|下/.test(short);
+    || /他|她|它|自己|看见|面板|系统|提示|目标|星运|信息|成年|未成年|刷出|出来|一条|而|上|下/.test(short);
 }
 
 function defaultTargetCharacterForChapterServer(chapter = {}) {
@@ -1213,33 +1252,53 @@ function defaultTargetCharacterForChapterServer(chapter = {}) {
 function collectCharacterStatEventsServer(chapter = {}) {
   const text = stateTextFromChapterServer(chapter);
   const defaultTarget = defaultTargetCharacterForChapterServer(chapter);
+  const roleNames = (chapter.roles || []).map((role) => characterShortNameServer(role)).filter(Boolean);
+  const knownCharacters = new Set(roleNames
+    .map((role) => characterShortNameServer(role))
+    .filter((name) => name && !isPrimaryProtagonistNameServer(name)));
+  const isKnownCharacter = (character) => {
+    if (!knownCharacters.size) return !roleNames.length;
+    return [...knownCharacters].some((name) => name === character || name.includes(character) || character.includes(name));
+  };
   const events = [];
   const add = (name, value, from, index, evidence) => {
     const character = normalizeCharacterStatNameServer(name || defaultTarget);
-    const numeric = clampPercentServer(value);
-    if (!character || isInvalidCharacterStatNameServer(character) || numeric === null) return;
+    const parsed = parseScoreValueServer(value);
+    const parsedFrom = from === null || from === undefined ? null : parseScoreValueServer(from);
+    if (!character || isInvalidCharacterStatNameServer(character) || !isKnownCharacter(character) || !parsed) return;
     events.push({
       character,
       key: "starLuck",
       label: `${character}星运/幸运值`,
-      value: numeric,
-      from: from === null || from === undefined ? null : clampPercentServer(from),
+      value: parsed.value,
+      rawValue: parsed.raw,
+      from: parsedFrom?.valid ? parsedFrom.value : null,
+      rawFrom: parsedFrom?.raw || "",
       unit: "/100",
+      outOfRange: !parsed.valid,
+      fromOutOfRange: Boolean(parsedFrom && !parsedFrom.valid),
       index: index || 0,
       evidence: compactRagText(evidence, 90),
     });
   };
 
-  const namedTransition = /([一-龥]{2,4})(?:[·的\s：:]){0,3}(?:星运值|星运指数|幸运值|气运值)[^。\n]{0,24}?(\d{1,3})\s*(?:\/\s*100|%)?\s*(?:→|->|—|-|~|～|至|到|涨到|升到|提升到|爬到|冲到|跳到|变成)\s*(\d{1,3})\s*(?:\/\s*100|%)?/g;
-  const namedSingle = /([一-龥]{2,4})(?:[·的\s：:]){0,3}(?:星运值|星运指数|幸运值|气运值)[^。\n]{0,18}?(\d{1,3})\s*(?:\/\s*100|%)?/g;
-  const targetTransition = /(?:目标|当前目标|目标对象)[^。\n]{0,8}(?:星运值|星运指数|幸运值|气运值)[^。\n]{0,18}?(\d{1,3})\s*(?:\/\s*100|%)?\s*(?:→|->|—|-|~|～|至|到|涨到|升到|提升到|爬到|冲到|跳到|变成)\s*(\d{1,3})\s*(?:\/\s*100|%)?/g;
-  const targetSingle = /(?:目标|当前目标|目标对象)[^。\n]{0,8}(?:星运值|星运指数|幸运值|气运值)[^。\n]{0,18}?(\d{1,3})\s*(?:\/\s*100|%)?/g;
-  const continuationSingle = /(?:星运值|星运指数|幸运值|气运值)[^。\n]{0,12}?(?:停在|显示|变成|为|是|：|:)[“"']?(\d{1,3})[”"']?\s*(?:\/\s*100|%)?/g;
-  const climbPattern = /([一-龥]{2,4})的(?:星运值|星运指数|幸运值|气运值)[^。\n]{0,24}?从\s*(\d{1,3})\s*(?:\/\s*100|%)?\s*(?:爬到|涨到|升到|到|变成)\s*(\d{1,3})\s*(?:\/\s*100|%)?/g;
+  const statWords = "星运值|星运指数|幸运值|气运值";
+  const scoreValue = "(\\d{1,4}|[零〇一二两三四五六七八九十百]{1,8})";
+  const changeWords = "→|->|—|-|~|～|至|到|涨到|升到|提升到|爬到|冲到|跳到|变成";
+  const namedTransition = new RegExp(`([一-龥]{2,4})(?:[·的\\s：:，,、｜|]){0,5}(?:${statWords})[^。\\n]{0,24}?${scoreValue}\\s*(?:\\/\\s*100|%)?\\s*(?:${changeWords})\\s*${scoreValue}\\s*(?:\\/\\s*100|%)?`, "g");
+  const namedSingle = new RegExp(`([一-龥]{2,4})(?:[·的\\s：:，,、｜|]){0,5}(?:${statWords})[^。\\n]{0,18}?${scoreValue}\\s*(?:\\/\\s*100|%)?`, "g");
+  const bracketNameSingle = new RegExp(`[【\\[]?([一-龥]{2,4})[，,、\\s]{1,4}(?:(?:成年|未成年|高星运目标|目标对象)[，,、\\s]{1,4})?(?:${statWords})[^。\\n]{0,18}?${scoreValue}\\s*(?:\\/\\s*100|%)?`, "g");
+  const previousNameSingle = new RegExp(`([一-龥]{2,4})[。；;，,、\\s]{0,4}(?:成年|高星运目标|当前状态|系统面板|面板)?[^。\\n]{0,20}?(?:${statWords})[^。\\n]{0,18}?${scoreValue}\\s*(?:\\/\\s*100|%)?`, "g");
+  const targetTransition = new RegExp(`(?:目标|当前目标|目标对象)[^。\\n]{0,8}(?:${statWords})[^。\\n]{0,18}?${scoreValue}\\s*(?:\\/\\s*100|%)?\\s*(?:${changeWords})\\s*${scoreValue}\\s*(?:\\/\\s*100|%)?`, "g");
+  const targetSingle = new RegExp(`(?:目标|当前目标|目标对象)[^。\\n]{0,8}(?:${statWords})[^。\\n]{0,18}?${scoreValue}\\s*(?:\\/\\s*100|%)?`, "g");
+  const continuationSingle = new RegExp(`(?:${statWords})[^。\\n]{0,12}?(?:停在|显示|变成|为|是|：|:|预估)[“"']?${scoreValue}[”"']?\\s*(?:\\/\\s*100|%)?`, "g");
+  const climbPattern = new RegExp(`([一-龥]{2,4})的(?:${statWords})[^。\\n]{0,24}?从\\s*${scoreValue}\\s*(?:\\/\\s*100|%)?\\s*(?:爬到|涨到|升到|到|变成)\\s*${scoreValue}\\s*(?:\\/\\s*100|%)?`, "g");
 
   for (const match of text.matchAll(namedTransition)) add(match[1], match[3], match[2], match.index, match[0]);
   for (const match of text.matchAll(climbPattern)) add(match[1], match[3], match[2], match.index, match[0]);
+  for (const match of text.matchAll(bracketNameSingle)) add(match[1], match[2], null, match.index, match[0]);
   for (const match of text.matchAll(namedSingle)) add(match[1], match[2], null, match.index, match[0]);
+  for (const match of text.matchAll(previousNameSingle)) add(match[1], match[2], null, match.index, match[0]);
   if (defaultTarget) {
     for (const match of text.matchAll(targetTransition)) add(defaultTarget, match[2], match[1], match.index, match[0]);
     for (const match of text.matchAll(targetSingle)) add(defaultTarget, match[1], null, match.index, match[0]);
@@ -1254,9 +1313,35 @@ function collectCharacterStatEventsServer(chapter = {}) {
   return events.sort((a, b) => a.index - b.index);
 }
 
+function characterStatRangeIssuesServer(events = [], pos = "") {
+  const issues = [];
+  const seen = new Set();
+  for (const event of events) {
+    const checks = [
+      event.outOfRange ? { raw: event.rawValue, value: event.value } : null,
+      event.fromOutOfRange ? { raw: event.rawFrom, value: parseScoreValueServer(event.rawFrom)?.value } : null,
+    ].filter(Boolean);
+    for (const check of checks) {
+      const key = `${event.character}-${check.raw}-${check.value}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      issues.push({
+        level: "高",
+        type: "数值合法性",
+        pos,
+        text: `${event.character}星运/幸运值越界：${scoreDisplayServer(check.raw, check.value)}，合法范围是 0-100。`,
+        fix: "改成 0-100 内的稳定人物数值，并和前后章节承接；如果想写 810 这类大数，应改成“星运能量余额”，不要写成人物星运/幸运值。",
+        evidence: event.evidence,
+      });
+    }
+  }
+  return issues;
+}
+
 function extractCharacterStatsServer(chapter = {}) {
   const grouped = new Map();
   for (const event of collectCharacterStatEventsServer(chapter)) {
+    if (event.outOfRange) continue;
     const previous = grouped.get(event.character);
     if (!previous || event.value > previous.value || (event.value === previous.value && previous.from === null && event.from !== null)) {
       grouped.set(event.character, event);
@@ -1390,6 +1475,7 @@ function numericRegressionIssuesServer(project = {}) {
     const previousTrust = previousState.trust?.value;
     const currentTrust = explicit.trust?.value;
     const context = `${JSON.stringify(chapter.detailedOutline || "")}\n${chapter.manuscript || ""}\n${chapter.outline || ""}`;
+    issues.push(...characterStatRangeIssuesServer(collectCharacterStatEventsServer(chapter), `第${chapter.id}章`));
     if (previousTrust !== undefined && previousTrust !== null && currentTrust !== undefined && currentTrust !== null && currentTrust < previousTrust && !trustDropAllowedTextServer(context)) {
       issues.push({
         level: "高",
