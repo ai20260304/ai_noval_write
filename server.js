@@ -1565,6 +1565,21 @@ function extractChapterFacts(project = {}) {
         updatedAt: now,
       });
     }
+    if (text) {
+      for (const fact of knownIdentityFactsInTextServer(project, chapter, text, chapterId).slice(0, 24)) {
+        rows.push({
+          projectId: project.id,
+          chapterId,
+          factType: "identity_knowledge",
+          subject: fact.knower,
+          predicate: "已知姓名/称呼",
+          object: fact.target,
+          evidence: fact.evidence,
+          confidence: 0.84,
+          updatedAt: now,
+        });
+      }
+    }
     for (const clue of chapter.clues || []) {
       if (!clue) continue;
       rows.push({
@@ -1646,13 +1661,133 @@ function previousStoryTextBeforeServer(project = {}, chapterId = 0, lookback = 8
     .join("\n");
 }
 
+function escapeRegExpTextServer(text = "") {
+  return String(text).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function isValidIdentityNameServer(name = "") {
+  const short = characterShortNameServer(name);
+  return /^[\u4e00-\u9fa5]{2,6}$/.test(short)
+    && !/^(男主|女主|主角|宿主|目标|当前|系统|面板|新人|演员|导演|母亲|房东|场务|剧务|她妈|刘母|妈妈|爸爸)$/.test(short);
+}
+
+function projectIdentityNamesServer(project = {}, chapter = null) {
+  const names = new Set();
+  const add = (name) => {
+    const short = characterShortNameServer(name);
+    if (isValidIdentityNameServer(short)) names.add(short);
+  };
+  (project.characters || []).forEach((character) => add(character.name));
+  (chapter?.roles || []).forEach(add);
+  const protagonist = project.characters?.find((character) => isPrimaryProtagonistNameServer(character.name))?.name
+    || project.characters?.[0]?.name;
+  add(protagonist);
+  if (/娱乐圈|女星|演员|明星/.test(`${project.title || ""}${project.genre || ""}${project.logline || ""}`)) add("陈玄");
+  return [...names].slice(0, 120);
+}
+
+function currentIdentityRelevantNamesServer(project = {}, chapter = {}) {
+  const names = new Set();
+  const context = `${chapter.title || ""}\n${chapter.outline || ""}\n${JSON.stringify(chapter.detailedOutline || "")}\n${(chapter.roles || []).join("\n")}`;
+  const allNames = projectIdentityNamesServer(project, chapter);
+  (chapter.roles || []).forEach((role) => {
+    const short = characterShortNameServer(role);
+    if (isValidIdentityNameServer(short)) names.add(short);
+  });
+  allNames.filter((name) => context.includes(name)).forEach((name) => names.add(name));
+  const protagonist = allNames.find((name) => isPrimaryProtagonistNameServer(name)) || allNames[0];
+  if (protagonist) names.add(protagonist);
+  return names;
+}
+
 function liuyifeiKnowsChenXuanBeforeServer(project = {}, chapter = {}) {
-  const previousText = previousStoryTextBeforeServer(project, chapter.id);
-  if (!previousText || !previousText.includes("刘亦菲") || !previousText.includes("陈玄")) return false;
-  return /刘亦菲[\s\S]{0,900}“陈玄[！!，,。—-]/.test(previousText)
-    || /“陈玄[！!，,。—-][\s\S]{0,900}刘亦菲/.test(previousText)
-    || /刘亦菲[\s\S]{0,500}不知道你叫什么名字[\s\S]{0,80}“陈玄/.test(previousText)
-    || /“陈玄，”她念了一遍/.test(previousText);
+  return knownIdentityFactsBeforeServer(project, chapter).some((fact) => fact.knower === "刘亦菲" && fact.target === "陈玄");
+}
+
+function identityEvidenceSnippetServer(text = "", index = 0) {
+  return compactRagText(String(text).slice(Math.max(0, index - 120), index + 260), 220);
+}
+
+function knownIdentityFactsInTextServer(project = {}, chapter = {}, text = "", chapterId = 0, relevantNames = null) {
+  const names = projectIdentityNamesServer(project, chapter).filter((name) => text.includes(name));
+  const relevant = relevantNames || new Set(names);
+  const facts = [];
+  const seen = new Set();
+  for (const knower of names) {
+    if (!relevant.has(knower) && ![...relevant].some((name) => name && text.includes(name))) continue;
+    for (const target of names) {
+      if (knower === target) continue;
+      if (!relevant.has(knower) && !relevant.has(target)) continue;
+      const k = escapeRegExpTextServer(knower);
+      const t = escapeRegExpTextServer(target);
+      const patterns = [
+        new RegExp(`${k}[\\s\\S]{0,180}“${t}(?:[，,。！!：:、—-]|”|$)`),
+        new RegExp(`“${t}(?:[，,。！!：:、—-]|”|$)[\\s\\S]{0,180}${k}`),
+        new RegExp(`${k}[\\s\\S]{0,600}(?:还不知道你叫什么名字|不知道你叫什么名字|你叫什么名字|你叫什么|全名)[\\s\\S]{0,160}“${t}`),
+      ];
+      const matched = patterns.map((pattern) => ({ pattern, match: text.match(pattern) })).find((item) => item.match);
+      if (!matched) continue;
+      const key = `${knower}->${target}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      facts.push({
+        knower,
+        target,
+        chapterId,
+        evidence: identityEvidenceSnippetServer(text, matched.match.index || 0),
+      });
+    }
+  }
+  return facts;
+}
+
+function knownIdentityFactsBeforeServer(project = {}, chapter = {}, lookback = 60) {
+  const currentId = Number(chapter.id || 0);
+  const relevantNames = currentIdentityRelevantNamesServer(project, chapter);
+  const facts = [];
+  const seen = new Set();
+  const previous = sortChaptersByIdServer(project.chapters || [])
+    .filter((item) => Number(item.id || 0) < currentId && (item.manuscript || item.memorySummary))
+    .slice(-lookback);
+  for (const item of previous) {
+    const text = [
+      item.manuscript,
+      item.memorySummary,
+      item.endingSnapshot,
+    ].filter(Boolean).join("\n");
+    for (const fact of knownIdentityFactsInTextServer(project, item, text, Number(item.id || 0), relevantNames)) {
+      const key = `${fact.knower}->${fact.target}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      facts.push(fact);
+    }
+  }
+  return facts;
+}
+
+function identityContinuityIssuesServer(project = {}, chapter = {}, text = "") {
+  const issues = [];
+  const seen = new Set();
+  for (const fact of knownIdentityFactsBeforeServer(project, chapter)) {
+    if (!text.includes(fact.knower) || !text.includes(fact.target)) continue;
+    const k = escapeRegExpTextServer(fact.knower);
+    const t = escapeRegExpTextServer(fact.target);
+    const repeatQuestion = new RegExp(`${k}[\\s\\S]{0,900}(?:我没记住你全名|还不知道你叫什么名字|不知道你叫什么名字|你叫什么名字|你叫什么|你姓什么|全名)[\\s\\S]{0,220}${t}`);
+    const repeatRealize = new RegExp(`${k}[\\s\\S]{0,900}(?:第一次知道|第一次听见|第一次记住|重新知道|重新认识|又知道了一次)[\\s\\S]{0,160}${t}`);
+    const targetThenTag = new RegExp(`${k}[\\s\\S]{0,500}${t}[\\s\\S]{0,120}(?:念了一遍|记住这个名字|记住了这个名字|第一次记住)`);
+    if (!repeatQuestion.test(text) && !repeatRealize.test(text) && !targetThenTag.test(text)) continue;
+    const key = `${fact.knower}->${fact.target}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    issues.push({
+      level: "高",
+      type: "连续性",
+      pos: `第${chapter.id}章`,
+      text: `身份认知重复：前文已写${fact.knower}知道${fact.target}的姓名/称呼，本章又写成重新问名或第一次记住。`,
+      fix: `删除重新问名桥段，让${fact.knower}直接称呼${fact.target}；把冲突改到行动结果、资源交换、关系边界或信任推进上。`,
+    });
+  }
+  return issues;
 }
 
 function unsupportedContinuityFactIssuesServer(project = {}, chapter = {}) {
@@ -1681,15 +1816,7 @@ function unsupportedContinuityFactIssuesServer(project = {}, chapter = {}) {
       text: `正文新增了前文和细纲没有支撑的私密事实：${word}。`,
       fix: "删除凭空新增事实，改用已出现的报纸、选角通告、电话预言、试镜结果等连续性证据。",
     }));
-  if (liuyifeiKnowsChenXuanBeforeServer(project, chapter) && /我没记住你全名|还不知道你叫什么名字|不知道你叫什么名字|第一次知道.*陈玄|重新知道.*陈玄/.test(text)) {
-    issues.push({
-      level: "高",
-      type: "连续性",
-      pos: `第${chapter.id}章`,
-      text: "身份认知重复：前文刘亦菲已经知道陈玄姓名，本章又写成重新问名或第一次记住。",
-      fix: "删除重新问名桥段，让刘亦菲直接称呼陈玄；把冲突改到事业结果、监护人边界或信任推进上。",
-    });
-  }
+  issues.push(...identityContinuityIssuesServer(project, chapter, text));
   if (isEarlyLiuyifeiChapterServer(project, chapter) && /十块钱|10块|三十块钱|30块/.test(text)) {
     issues.push({
       level: "高",
@@ -1995,7 +2122,7 @@ function regressionIssuesForProject(project = {}) {
   }
   issues.push(...numericRegressionIssuesServer(project));
   const drafts = chapters.filter((chapter) => chapter.manuscript);
-  for (const chapter of drafts.slice(0, 80)) {
+  for (const chapter of drafts) {
     const words = String(chapter.manuscript || "").match(/[\u4e00-\u9fa5A-Za-z0-9]/g)?.length || 0;
     if (words && (words < 2200 || words > 3000)) {
       issues.push({ level: words < 2200 ? "高" : "中", type: "字数", pos: `第${chapter.id}章`, text: `正文 ${words} 字，不在 2200-3000 区间。`, fix: "重新生成或编辑到目标字数区间。" });

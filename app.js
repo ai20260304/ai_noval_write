@@ -567,20 +567,139 @@ function previousStoryTextBefore(project, chapterId, lookback = 8) {
     .join("\n");
 }
 
+function escapeRegExpText(text = "") {
+  return String(text).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function isValidIdentityName(name = "") {
+  const short = characterShortName(name);
+  return /^[\u4e00-\u9fa5]{2,6}$/.test(short)
+    && !/^(男主|女主|主角|宿主|目标|当前|系统|面板|新人|演员|导演|母亲|房东|场务|剧务|她妈|刘母|妈妈|爸爸)$/.test(short);
+}
+
+function projectIdentityNames(project, chapter = null) {
+  const names = new Set();
+  const add = (name) => {
+    const short = characterShortName(name);
+    if (isValidIdentityName(short)) names.add(short);
+  };
+  (project?.characters || []).forEach((character) => add(character.name));
+  (chapter?.roles || []).forEach(add);
+  const protagonist = project?.characters?.find((character) => isPrimaryProtagonistName(character.name))?.name
+    || project?.characters?.[0]?.name;
+  add(protagonist);
+  if (isEntertainmentProject(project)) add("陈玄");
+  return [...names].slice(0, 120);
+}
+
+function currentIdentityRelevantNames(project, chapter) {
+  const names = new Set();
+  const context = `${chapter?.title || ""}\n${chapter?.outline || ""}\n${JSON.stringify(chapter?.detailedOutline || "")}\n${(chapter?.roles || []).join("\n")}`;
+  const allNames = projectIdentityNames(project, chapter);
+  (chapter?.roles || []).forEach((role) => {
+    const short = characterShortName(role);
+    if (isValidIdentityName(short)) names.add(short);
+  });
+  allNames.filter((name) => context.includes(name)).forEach((name) => names.add(name));
+  const protagonist = allNames.find((name) => isPrimaryProtagonistName(name)) || allNames[0];
+  if (protagonist) names.add(protagonist);
+  return names;
+}
+
 function liuyifeiKnowsChenXuanBefore(project, chapter) {
-  const previousText = previousStoryTextBefore(project, chapter?.id);
-  if (!previousText || !previousText.includes("刘亦菲") || !previousText.includes("陈玄")) return false;
-  return /刘亦菲[\s\S]{0,900}“陈玄[！!，,。—-]/.test(previousText)
-    || /“陈玄[！!，,。—-][\s\S]{0,900}刘亦菲/.test(previousText)
-    || /刘亦菲[\s\S]{0,500}不知道你叫什么名字[\s\S]{0,80}“陈玄/.test(previousText)
-    || /“陈玄，”她念了一遍/.test(previousText);
+  return knownIdentityFactsBefore(project, chapter).some((fact) => fact.knower === "刘亦菲" && fact.target === "陈玄");
+}
+
+function identityEvidenceSnippet(text = "", index = 0) {
+  return compactMemoryText(String(text).slice(Math.max(0, index - 120), index + 260), 220);
+}
+
+function knownIdentityFactsInText(project, chapter, text = "", chapterId = 0, relevantNames = null) {
+  const names = projectIdentityNames(project, chapter).filter((name) => text.includes(name));
+  const relevant = relevantNames || new Set(names);
+  const facts = [];
+  const seen = new Set();
+  for (const knower of names) {
+    if (!relevant.has(knower) && ![...relevant].some((name) => name && text.includes(name))) continue;
+    for (const target of names) {
+      if (knower === target) continue;
+      if (!relevant.has(knower) && !relevant.has(target)) continue;
+      const k = escapeRegExpText(knower);
+      const t = escapeRegExpText(target);
+      const patterns = [
+        new RegExp(`${k}[\\s\\S]{0,180}“${t}(?:[，,。！!：:、—-]|”|$)`),
+        new RegExp(`“${t}(?:[，,。！!：:、—-]|”|$)[\\s\\S]{0,180}${k}`),
+        new RegExp(`${k}[\\s\\S]{0,600}(?:还不知道你叫什么名字|不知道你叫什么名字|你叫什么名字|你叫什么|全名)[\\s\\S]{0,160}“${t}`),
+      ];
+      const matched = patterns.map((pattern) => ({ pattern, match: text.match(pattern) })).find((item) => item.match);
+      if (!matched) continue;
+      const key = `${knower}->${target}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      facts.push({
+        knower,
+        target,
+        chapterId,
+        evidence: identityEvidenceSnippet(text, matched.match.index || 0),
+      });
+    }
+  }
+  return facts;
+}
+
+function knownIdentityFactsBefore(project, chapter, lookback = 60) {
+  const currentId = Number(chapter?.id || 0);
+  const relevantNames = currentIdentityRelevantNames(project, chapter);
+  const facts = [];
+  const seen = new Set();
+  const previous = sortChaptersById(project?.chapters || [])
+    .filter((item) => Number(item.id || 0) < currentId && (item.manuscript || item.memorySummary))
+    .slice(-lookback);
+  for (const item of previous) {
+    const text = [
+      item.manuscript,
+      item.memorySummary,
+      item.endingSnapshot,
+    ].filter(Boolean).join("\n");
+    for (const fact of knownIdentityFactsInText(project, item, text, Number(item.id || 0), relevantNames)) {
+      const key = `${fact.knower}->${fact.target}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      facts.push(fact);
+    }
+  }
+  return facts;
 }
 
 function identityContinuityLines(project, chapter) {
-  if (!isEntertainmentProject(project) || !liuyifeiKnowsChenXuanBefore(project, chapter)) return [];
-  return [
-    "身份认知锁：刘亦菲已知道男主叫陈玄，后续不能再写“我没记住你全名”“我还不知道你叫什么名字”或重新认识姓名；需要互动时直接称呼陈玄，把戏剧点放在事业结果、边界和信任推进上。",
-  ];
+  const facts = knownIdentityFactsBefore(project, chapter).slice(0, 10);
+  return facts.map((fact) => (
+    `身份认知锁：${fact.knower}已知道${fact.target}的姓名/称呼，后续不能再写“我没记住你全名”“我还不知道你叫什么名字”或重新认识${fact.target}；需要互动时直接称呼，把戏剧点放在行动、利益、边界和信任推进上。`
+  ));
+}
+
+function identityContinuityIssues(project, chapter, text = "") {
+  const issues = [];
+  const seen = new Set();
+  for (const fact of knownIdentityFactsBefore(project, chapter)) {
+    if (!text.includes(fact.knower) || !text.includes(fact.target)) continue;
+    const k = escapeRegExpText(fact.knower);
+    const t = escapeRegExpText(fact.target);
+    const repeatQuestion = new RegExp(`${k}[\\s\\S]{0,900}(?:我没记住你全名|还不知道你叫什么名字|不知道你叫什么名字|你叫什么名字|你叫什么|你姓什么|全名)[\\s\\S]{0,220}${t}`);
+    const repeatRealize = new RegExp(`${k}[\\s\\S]{0,900}(?:第一次知道|第一次听见|第一次记住|重新知道|重新认识|又知道了一次)[\\s\\S]{0,160}${t}`);
+    const targetThenTag = new RegExp(`${k}[\\s\\S]{0,500}${t}[\\s\\S]{0,120}(?:念了一遍|记住这个名字|记住了这个名字|第一次记住)`);
+    if (!repeatQuestion.test(text) && !repeatRealize.test(text) && !targetThenTag.test(text)) continue;
+    const key = `${fact.knower}->${fact.target}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    issues.push({
+      type: "连续性",
+      level: "高",
+      text: `身份认知重复：前文已写${fact.knower}知道${fact.target}的姓名/称呼，本章又写成重新问名或第一次记住。`,
+      fix: `删除重新问名桥段，让${fact.knower}直接称呼${fact.target}；把冲突改到行动结果、资源交换、关系边界或信任推进上。`,
+    });
+  }
+  return issues;
 }
 
 function buildChapterContinuityMemory(project, chapter, lookback = 3) {
@@ -679,9 +798,7 @@ function factualContinuityRules(project, chapter) {
   if (unsupportedPrivateFacts) {
     rules.push(`事实锁定：上一章正文和本章细纲没有写到的私密验证点禁止新增，尤其不能凭空写：${unsupportedPrivateFacts}。需要增强信任时，只能使用已经出现的报纸、选角通告、演员路、电话、试镜结果等事实。`);
   }
-  if (liuyifeiKnowsChenXuanBefore(project, chapter)) {
-    rules.push("身份认知锁：刘亦菲已知道陈玄姓名，禁止再写她问“你叫什么名字”“我没记住你全名”或像第一次听到“陈玄”；她可以直接叫陈玄，互动重点放在信任、事业结果和边界感。");
-  }
+  rules.push(...identityContinuityLines(project, chapter));
   if (isEarlyLiuyifeiChapter(project, chapter)) {
     rules.push("刘亦菲前 7 章金额锁定：陈玄开局兜里只有七块钱；刘亦菲补算命费也只能写七块钱。禁止写十块钱、10块钱、三十块钱或临时改价。");
     rules.push("刘亦菲前 7 章信任来源锁定：信任来自报纸、演员路、北京电影学院/试镜电话等事业结果，不来自胎记、身体隐私、家庭秘密或成人暧昧。");
@@ -4974,14 +5091,7 @@ function unsupportedContinuityFactIssues(project, chapter, text = "", currentDet
       fix: "删除该私密事实，改用已出现的报纸、选角通告、电话预言、试镜结果等连续性证据。",
     }));
 
-  if (liuyifeiKnowsChenXuanBefore(project, chapter) && /我没记住你全名|还不知道你叫什么名字|不知道你叫什么名字|第一次知道.*陈玄|重新知道.*陈玄/.test(text)) {
-    issues.push({
-      type: "连续性",
-      level: "高",
-      text: "身份认知重复：前文刘亦菲已经知道陈玄姓名，本章又写成重新问名或第一次记住。",
-      fix: "删除重新问名桥段，让刘亦菲直接称呼陈玄；把冲突改到事业结果、监护人边界或信任推进上。",
-    });
-  }
+  issues.push(...identityContinuityIssues(project, chapter, text));
 
   if (isEarlyLiuyifeiChapter(project, chapter) && /十块钱|10块|三十块钱|30块/.test(text)) {
     issues.push({
