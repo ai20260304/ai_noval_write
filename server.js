@@ -1126,9 +1126,195 @@ function vectorSource(projectId, sourceKind, sourceRef, content, metadata = {}) 
   };
 }
 
+function clampPercentServer(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return null;
+  return Math.max(0, Math.min(100, Math.round(number)));
+}
+
+function stateTextFromChapterServer(chapter = {}) {
+  const detail = chapter.detailedOutline && typeof chapter.detailedOutline === "object" && !Array.isArray(chapter.detailedOutline)
+    ? chapter.detailedOutline
+    : {};
+  const scenes = (detail.scenes || [])
+    .map((scene) => [scene.title, scene.content, ...(scene.systemLines || [])].filter(Boolean).join(" "))
+    .join("\n");
+  return [
+    chapter.outline,
+    detail.core,
+    detail.opening,
+    scenes,
+    detail.hook,
+    chapter.manuscript,
+  ].filter(Boolean).join("\n");
+}
+
+function collectPercentEventsServer(text = "", transitionRegex, singleRegex) {
+  const events = [];
+  for (const match of String(text || "").matchAll(singleRegex)) {
+    const value = clampPercentServer(match[1]);
+    if (value === null) continue;
+    events.push({
+      value,
+      from: null,
+      to: value,
+      index: match.index || 0,
+      evidence: compactRagText(match[0], 80),
+    });
+  }
+  for (const match of String(text || "").matchAll(transitionRegex)) {
+    const from = clampPercentServer(match[1]);
+    const to = clampPercentServer(match[2]);
+    if (to === null) continue;
+    events.push({
+      value: to,
+      from,
+      to,
+      index: match.index || 0,
+      evidence: compactRagText(match[0], 80),
+    });
+  }
+  return events.sort((a, b) => a.index - b.index);
+}
+
+function lastPercentEventServer(events = []) {
+  return events.length ? events[events.length - 1] : null;
+}
+
+function maxPercentEventServer(events = []) {
+  return events.reduce((best, item) => {
+    if (!best || item.value > best.value) return item;
+    if (item.value === best.value && best.from === null && item.from !== null) return item;
+    return best;
+  }, null);
+}
+
+function extractChapterProgressStateServer(chapter = {}) {
+  const text = stateTextFromChapterServer(chapter);
+  const trustEvents = collectPercentEventsServer(
+    text,
+    /(?:刘亦菲|星运羁绊|事业型羁绊|高星运目标|目标)?[^。\n]{0,12}?信任度[^。\n]{0,24}?(\d{1,3})\s*%\s*(?:→|->|—|-|~|～|至|到|涨到|升到|提升到|拉到)\s*(\d{1,3})\s*%/g,
+    /(?:刘亦菲|星运羁绊|事业型羁绊|高星运目标|目标)?[^。\n]{0,12}?信任度[^。\n]{0,24}?(\d{1,3})\s*%(?!\s*(?:→|->|—|-|~|～|至|到|涨到|升到|提升到|拉到))/g,
+  );
+  const rawBacklashEvents = collectPercentEventsServer(
+    text,
+    /反噬(?:值|进度|波动区间)?[^。\n]{0,18}?(\d{1,3})\s*%\s*(?:→|->|—|-|~|～|至|到|涨到|升到|跳到|冲破|拉到)\s*(\d{1,3})\s*%/g,
+    /(?:当前)?反噬(?:值|进度)?[^。\n]{0,18}?(\d{1,3})\s*%(?!\s*(?:→|->|—|-|~|～|至|到|涨到|升到|跳到|冲破|拉到))/g,
+  );
+  const backlashEvents = rawBacklashEvents.filter((event) => !/波动区间|风险区间/.test(event.evidence));
+  const predictionEvents = collectPercentEventsServer(
+    text,
+    /预言(?:完成|进度|兑现)[^。\n]{0,18}?(\d{1,3})\s*%\s*(?:→|->|—|-|~|～|至|到|涨到|升到|提升到)\s*(\d{1,3})\s*%/g,
+    /预言(?:完成|进度|兑现)[^。\n]{0,18}?(\d{1,3})\s*%(?!\s*(?:→|->|—|-|~|～|至|到|涨到|升到|提升到))/g,
+  );
+  const trust = trustDropAllowedTextServer(text) ? lastPercentEventServer(trustEvents) : maxPercentEventServer(trustEvents);
+  const backlash = lastPercentEventServer(backlashEvents.length ? backlashEvents : rawBacklashEvents);
+  const prediction = lastPercentEventServer(predictionEvents);
+  return {
+    trust: trust ? { label: "刘亦菲信任度", value: trust.value, from: trust.from, evidence: trust.evidence } : null,
+    backlash: backlash ? { label: "反噬值", value: backlash.value, from: backlash.from, evidence: backlash.evidence } : null,
+    prediction: prediction ? { label: "预言完成度", value: prediction.value, from: prediction.from, evidence: prediction.evidence } : null,
+  };
+}
+
+function sortChaptersByIdServer(chapters = []) {
+  return [...chapters].sort((a, b) => Number(a.id || 0) - Number(b.id || 0));
+}
+
+function progressStateCoreServer(state = {}) {
+  return {
+    trust: state.trust?.value !== undefined ? state.trust : null,
+    backlash: state.backlash?.value !== undefined ? state.backlash : null,
+    prediction: state.prediction?.value !== undefined ? state.prediction : null,
+  };
+}
+
+function mergeProgressStateServer(previous = {}, explicit = {}, chapterId = 0) {
+  const next = {
+    trust: previous.trust ? { ...previous.trust, inherited: true } : null,
+    backlash: previous.backlash ? { ...previous.backlash, inherited: true } : null,
+    prediction: previous.prediction ? { ...previous.prediction, inherited: true } : null,
+  };
+  for (const key of ["trust", "backlash", "prediction"]) {
+    if (explicit[key]?.value !== undefined && explicit[key]?.value !== null) {
+      next[key] = { ...explicit[key], chapterId, inherited: false };
+    }
+  }
+  return progressStateCoreServer(next);
+}
+
+function resolveChapterProgressStateServer(project = {}, chapter = {}) {
+  const targetId = Number(chapter?.id || 0);
+  let state = {};
+  for (const item of sortChaptersByIdServer(project.chapters || [])) {
+    const itemId = Number(item.id || 0);
+    if (!itemId || itemId > targetId) break;
+    state = mergeProgressStateServer(state, extractChapterProgressStateServer(item), itemId);
+    if (itemId === targetId) break;
+  }
+  return progressStateCoreServer(state);
+}
+
+function buildProjectProgressStateMapServer(project = {}) {
+  const map = new Map();
+  let state = {};
+  for (const item of sortChaptersByIdServer(project.chapters || [])) {
+    const itemId = Number(item.id || 0);
+    if (!itemId) continue;
+    state = mergeProgressStateServer(state, extractChapterProgressStateServer(item), itemId);
+    map.set(itemId, progressStateCoreServer(state));
+  }
+  return map;
+}
+
+function formatProgressItemServer(item) {
+  if (!item || item.value === undefined || item.value === null) return "";
+  const value = item.from !== null && item.from !== undefined && item.from !== item.value
+    ? `${item.from}%→${item.value}%`
+    : `${item.value}%`;
+  return `${item.label || "数值"}${value}${item.inherited ? "（承接）" : ""}`;
+}
+
+function progressStateSummaryServer(state = {}) {
+  return [state.trust, state.backlash, state.prediction]
+    .map(formatProgressItemServer)
+    .filter(Boolean)
+    .join("；");
+}
+
+function trustDropAllowedTextServer(text = "") {
+  return /背叛|误会|失望|决裂|翻脸|信任崩塌|信任下降|信任跌|信任降低|关系破裂/.test(String(text || ""));
+}
+
+function numericRegressionIssuesServer(project = {}) {
+  const issues = [];
+  let previousState = {};
+  for (const chapter of sortChaptersByIdServer(project.chapters || [])) {
+    const chapterId = Number(chapter.id || 0);
+    if (!chapterId) continue;
+    const explicit = extractChapterProgressStateServer(chapter);
+    const currentState = mergeProgressStateServer(previousState, explicit, chapterId);
+    const previousTrust = previousState.trust?.value;
+    const currentTrust = explicit.trust?.value;
+    const context = `${JSON.stringify(chapter.detailedOutline || "")}\n${chapter.manuscript || ""}\n${chapter.outline || ""}`;
+    if (previousTrust !== undefined && previousTrust !== null && currentTrust !== undefined && currentTrust !== null && currentTrust < previousTrust && !trustDropAllowedTextServer(context)) {
+      issues.push({
+        level: "高",
+        type: "数值连续性",
+        pos: `第${chapter.id}章`,
+        text: `刘亦菲信任度倒退：上一章 ${previousTrust}%，本章 ${currentTrust}%。`,
+        fix: "把本章信任度改为持平或上升；如果确实要下降，先在细纲写清误会/背叛/信任崩塌的剧情原因。",
+      });
+    }
+    previousState = currentState;
+  }
+  return issues;
+}
+
 function extractChapterFacts(project = {}) {
   const rows = [];
   const now = new Date().toISOString();
+  const progressStateMap = buildProjectProgressStateMapServer(project);
   for (const chapter of project.chapters || []) {
     const chapterId = Number(chapter.id || 0);
     if (!chapterId) continue;
@@ -1199,6 +1385,21 @@ function extractChapterFacts(project = {}) {
         updatedAt: now,
       });
     }
+    const progressState = progressStateMap.get(chapterId) || progressStateCoreServer(extractChapterProgressStateServer(chapter));
+    for (const [key, item] of Object.entries(progressState)) {
+      if (!item || item.value === undefined || item.value === null) continue;
+      rows.push({
+        projectId: project.id,
+        chapterId,
+        factType: "numeric_state",
+        subject: `第${chapterId}章`,
+        predicate: item.label || key,
+        object: `${item.value}%${item.inherited ? "（承接）" : ""}`,
+        evidence: item.evidence || progressStateSummaryServer(progressState),
+        confidence: item.inherited ? 0.72 : 0.9,
+        updatedAt: now,
+      });
+    }
   }
   return rows;
 }
@@ -1259,6 +1460,7 @@ function extractCharacterStates(project = {}) {
   const rows = [];
   const now = new Date().toISOString();
   const chapters = project.chapters || [];
+  const progressStateMap = buildProjectProgressStateMapServer(project);
   for (const character of project.characters || []) {
     const name = String(character.name || "").trim();
     if (!name) continue;
@@ -1267,6 +1469,7 @@ function extractCharacterStates(project = {}) {
       .filter((chapter) => (chapter.roles || []).some((role) => characterShortNameServer(role) === short) || String(chapter.manuscript || "").includes(short))
       .slice(-5);
     const recent = related.at(-1) || {};
+    const progressState = recent?.id ? (progressStateMap.get(Number(recent.id || 0)) || {}) : {};
     rows.push({
       projectId: project.id,
       characterName: name,
@@ -1274,7 +1477,7 @@ function extractCharacterStates(project = {}) {
       status: character.risk ? `缺席风险：${character.risk}` : "持续跟踪",
       location: recent.title || character.plan || "待定位",
       goal: character.next || character.plan || "按角色线推进",
-      relationSnapshot: character.relation || character.role || "",
+      relationSnapshot: [character.relation || character.role || "", progressStateSummaryServer(progressState)].filter(Boolean).join("；"),
       powerState: /星运|预言|赋能|强化|金手指/.test(`${character.role || ""}${character.relation || ""}${character.next || ""}`) ? "受金手指线影响" : "",
       evidence: compactRagText([character.actual, character.next, recent.memorySummary, recent.outline].filter(Boolean).join("；"), 520),
       updatedAt: now,
@@ -1413,6 +1616,7 @@ function rebuildVectorIndex(project, facts = [], states = []) {
 
 function createPlotVersion(project = {}, label = "自动基线") {
   const now = new Date().toISOString();
+  const progressStateMap = buildProjectProgressStateMapServer(project);
   const summary = compactRagText([
     project.title,
     `当前章节：${project.currentChapter || 0}`,
@@ -1431,6 +1635,7 @@ function createPlotVersion(project = {}, label = "自动基线") {
       status: chapter.status,
       outline: chapter.outline,
       detailedOutline: chapter.detailedOutline,
+      progressState: progressStateMap.get(Number(chapter.id || 0)) || {},
       memorySummary: chapter.memorySummary || "",
       endingSnapshot: chapter.endingSnapshot || "",
       score: chapter.score || null,
@@ -1542,6 +1747,7 @@ function regressionIssuesForProject(project = {}) {
   if (factCount < Math.min(20, Math.max(5, chapters.filter((chapter) => chapter.manuscript).length * 2))) {
     issues.push({ level: "中", type: "事实库", pos: "章节事实", text: `章节事实只有 ${factCount} 条，事实覆盖偏低。`, fix: "生成或保存正文后同步事实库，必要时补角色和伏笔字段。" });
   }
+  issues.push(...numericRegressionIssuesServer(project));
   const drafts = chapters.filter((chapter) => chapter.manuscript);
   for (const chapter of drafts.slice(0, 80)) {
     const words = String(chapter.manuscript || "").match(/[\u4e00-\u9fa5A-Za-z0-9]/g)?.length || 0;

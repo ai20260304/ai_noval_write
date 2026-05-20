@@ -443,7 +443,7 @@ function chapterOutlineMemoryText(chapter, limit = 320) {
   const detail = chapter.detailedOutline;
   if (detail && !Array.isArray(detail)) {
     const scenes = (detail.scenes || [])
-      .map((scene) => [scene.title, scene.content].filter(Boolean).join("："))
+      .map((scene) => [scene.title, scene.content, ...(scene.systemLines || [])].filter(Boolean).join("："))
       .filter(Boolean)
       .slice(0, 4)
       .join(" / ");
@@ -485,10 +485,12 @@ function buildNextChapterBridge(project, chapter) {
 
 function buildChapterStorySnapshot(project, chapter) {
   if (!chapter) return null;
+  updateChapterProgressState(project, chapter);
   const outline = chapterOutlineMemoryText(chapter);
   const ending = chapterEndingMemory(chapter);
+  const progressSummary = chapterProgressSummary(chapter.progressState);
   const summary = compactMemoryText(
-    `第${chapter.id}章《${chapter.title || ""}》：${outline}${ending ? `；结尾落点：${ending}` : ""}`,
+    `第${chapter.id}章《${chapter.title || ""}》：${outline}${progressSummary ? `；数值状态：${progressSummary}` : ""}${ending ? `；结尾落点：${ending}` : ""}`,
     480,
   );
   return {
@@ -563,11 +565,18 @@ function buildChapterContinuityMemory(project, chapter, lookback = 3) {
   const previousSummary = previous ? compactMemoryText(summarizeChapterMemory(previous), 240) : "";
   const previousBridge = previous?.nextChapterBridge ? compactMemoryText(previous.nextChapterBridge, 300) : "";
   const currentNeed = chapterOutlineMemoryText(chapter, 200);
+  const previousProgress = previous ? updateChapterProgressState(project, previous) : null;
+  const currentProgress = updateChapterProgressState(project, chapter);
+  const progressLines = [
+    previousProgress ? `上章数值：${chapterProgressSummary(previousProgress)}` : "",
+    currentProgress ? `本章数值：${chapterProgressSummary(currentProgress)}` : "",
+  ].filter(Boolean);
   const carry = [
     previous ? `上一章结尾：${previousEnding}` : "上一章结尾：无",
     previousBridge ? `上章交接：${previousBridge}` : "",
     previousSummary ? `上一章摘要：${previousSummary}` : "",
     `本章必须接住：${currentNeed || compactMemoryText(chapter?.title || "", 160)}`,
+    progressLines.length ? `数值状态：${progressLines.join(" ｜ ")}` : "",
     recentLines.length ? `最近剧情：${recentLines.join(" ｜ ")}` : "",
     roleLines.length ? `角色状态：${roleLines.join(" ｜ ")}` : "",
     openThreads.length ? `未回收线索：${openThreads.join(" ｜ ")}` : "",
@@ -582,6 +591,7 @@ function buildChapterContinuityMemory(project, chapter, lookback = 3) {
     previousSummary,
     previousBridge,
     currentNeed,
+    progressLines,
     recentLines,
     roleLines,
     openThreads,
@@ -648,6 +658,7 @@ function buildChapterGenerationContract(project, chapter) {
   const goldFingerRules = buildGoldFingerRules(project);
   const continuity = buildChapterContinuityMemory(project, chapter);
   const factRules = factualContinuityRules(project, chapter);
+  const numericRules = buildNumericContinuityRules(project, chapter);
   return [
     `正文目标 ${band.target} 字，合格区间 ${band.min}-${band.max} 字。`,
     "只输出小说正文，不输出粗纲、细纲、写法说明、规则复述或分析文字。",
@@ -659,6 +670,7 @@ function buildChapterGenerationContract(project, chapter) {
     continuity.previousEnding ? `开篇落点：第一场必须处理“${continuity.previousEnding}”留下的结果、人物位置或未解决压力。` : "",
     "前 300 字必须先接住上一章结果、余波或人物状态，再写本章新推进。",
     "禁止把每章写成独立短篇；不要跳过上一章结尾直接开新事件。",
+    ...numericRules,
     ...factRules,
     "每段都落在人物动作、对话、心理选择、关系变化或结果变化上，少解释，少静态陈设。",
     ...(goldFingerRules.length ? [`金手指必须有操作感：${goldFingerRules.join("；")}`] : []),
@@ -713,6 +725,243 @@ function chapterWordCount(text = "") {
 
 function projectWordCount(project = {}) {
   return (project.chapters || []).reduce((sum, chapter) => sum + chapterWordCount(chapter?.manuscript || ""), 0);
+}
+
+function clampPercent(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return null;
+  return Math.max(0, Math.min(100, Math.round(number)));
+}
+
+function stateTextFromChapter(chapter = {}) {
+  const detail = chapter.detailedOutline && !Array.isArray(chapter.detailedOutline)
+    ? chapter.detailedOutline
+    : {};
+  const scenes = (detail.scenes || [])
+    .map((scene) => [scene.title, scene.content, ...(scene.systemLines || [])].filter(Boolean).join(" "))
+    .join("\n");
+  return [
+    chapter.outline,
+    detail.core,
+    detail.opening,
+    scenes,
+    detail.hook,
+    chapter.manuscript,
+  ].filter(Boolean).join("\n");
+}
+
+function collectPercentEvents(text = "", transitionRegex, singleRegex) {
+  const events = [];
+  for (const match of String(text || "").matchAll(singleRegex)) {
+    const value = clampPercent(match[1]);
+    if (value === null) continue;
+    events.push({
+      value,
+      from: null,
+      to: value,
+      index: match.index || 0,
+      evidence: compactMemoryText(match[0], 80),
+    });
+  }
+  for (const match of String(text || "").matchAll(transitionRegex)) {
+    const from = clampPercent(match[1]);
+    const to = clampPercent(match[2]);
+    if (to === null) continue;
+    events.push({
+      value: to,
+      from,
+      to,
+      index: match.index || 0,
+      evidence: compactMemoryText(match[0], 80),
+    });
+  }
+  return events.sort((a, b) => a.index - b.index);
+}
+
+function lastPercentEvent(events = []) {
+  return events.length ? events[events.length - 1] : null;
+}
+
+function maxPercentEvent(events = []) {
+  return events.reduce((best, item) => {
+    if (!best || item.value > best.value) return item;
+    if (item.value === best.value && best.from === null && item.from !== null) return item;
+    return best;
+  }, null);
+}
+
+function extractChapterProgressState(chapter = {}) {
+  const text = stateTextFromChapter(chapter);
+  const trustEvents = collectPercentEvents(
+    text,
+    /(?:刘亦菲|星运羁绊|事业型羁绊|高星运目标|目标)?[^。\n]{0,12}?信任度[^。\n]{0,24}?(\d{1,3})\s*%\s*(?:→|->|—|-|~|～|至|到|涨到|升到|提升到|拉到)\s*(\d{1,3})\s*%/g,
+    /(?:刘亦菲|星运羁绊|事业型羁绊|高星运目标|目标)?[^。\n]{0,12}?信任度[^。\n]{0,24}?(\d{1,3})\s*%(?!\s*(?:→|->|—|-|~|～|至|到|涨到|升到|提升到|拉到))/g,
+  );
+  const rawBacklashEvents = collectPercentEvents(
+    text,
+    /反噬(?:值|进度|波动区间)?[^。\n]{0,18}?(\d{1,3})\s*%\s*(?:→|->|—|-|~|～|至|到|涨到|升到|跳到|冲破|拉到)\s*(\d{1,3})\s*%/g,
+    /(?:当前)?反噬(?:值|进度)?[^。\n]{0,18}?(\d{1,3})\s*%(?!\s*(?:→|->|—|-|~|～|至|到|涨到|升到|跳到|冲破|拉到))/g,
+  );
+  const backlashEvents = rawBacklashEvents.filter((event) => !/波动区间|风险区间/.test(event.evidence));
+  const predictionEvents = collectPercentEvents(
+    text,
+    /预言(?:完成|进度|兑现)[^。\n]{0,18}?(\d{1,3})\s*%\s*(?:→|->|—|-|~|～|至|到|涨到|升到|提升到)\s*(\d{1,3})\s*%/g,
+    /预言(?:完成|进度|兑现)[^。\n]{0,18}?(\d{1,3})\s*%(?!\s*(?:→|->|—|-|~|～|至|到|涨到|升到|提升到))/g,
+  );
+  const trust = trustDropAllowedText(text) ? lastPercentEvent(trustEvents) : maxPercentEvent(trustEvents);
+  const backlash = lastPercentEvent(backlashEvents.length ? backlashEvents : rawBacklashEvents);
+  const prediction = lastPercentEvent(predictionEvents);
+  return {
+    trust: trust ? { label: "刘亦菲信任度", value: trust.value, from: trust.from, evidence: trust.evidence } : null,
+    backlash: backlash ? { label: "反噬值", value: backlash.value, from: backlash.from, evidence: backlash.evidence } : null,
+    prediction: prediction ? { label: "预言完成度", value: prediction.value, from: prediction.from, evidence: prediction.evidence } : null,
+  };
+}
+
+function progressStateCore(state = {}) {
+  return {
+    trust: state.trust?.value !== undefined ? state.trust : null,
+    backlash: state.backlash?.value !== undefined ? state.backlash : null,
+    prediction: state.prediction?.value !== undefined ? state.prediction : null,
+  };
+}
+
+function mergeProgressState(previous = {}, explicit = {}, chapterId = 0) {
+  const next = {
+    trust: previous.trust ? { ...previous.trust, inherited: true } : null,
+    backlash: previous.backlash ? { ...previous.backlash, inherited: true } : null,
+    prediction: previous.prediction ? { ...previous.prediction, inherited: true } : null,
+  };
+  for (const key of ["trust", "backlash", "prediction"]) {
+    if (explicit[key]?.value !== undefined && explicit[key]?.value !== null) {
+      next[key] = { ...explicit[key], chapterId, inherited: false };
+    }
+  }
+  return progressStateCore(next);
+}
+
+function resolveChapterProgressState(project = {}, chapter = {}) {
+  const sorted = sortChaptersById(project?.chapters || []);
+  const targetId = Number(chapter?.id || 0);
+  if (!targetId) return progressStateCore(extractChapterProgressState(chapter));
+  let state = {};
+  for (const item of sorted) {
+    const itemId = Number(item.id || 0);
+    if (!itemId || itemId > targetId) break;
+    state = mergeProgressState(state, extractChapterProgressState(item), itemId);
+    if (itemId === targetId) break;
+  }
+  return progressStateCore(state);
+}
+
+function buildProjectProgressStateMap(project = {}) {
+  const map = new Map();
+  let state = {};
+  for (const item of sortChaptersById(project.chapters || [])) {
+    const itemId = Number(item.id || 0);
+    if (!itemId) continue;
+    state = mergeProgressState(state, extractChapterProgressState(item), itemId);
+    map.set(itemId, progressStateCore(state));
+  }
+  return map;
+}
+
+function updateChapterProgressState(project = {}, chapter = {}) {
+  if (!chapter) return null;
+  const next = resolveChapterProgressState(project, chapter);
+  const previousJson = JSON.stringify(progressStateCore(chapter.progressState || {}));
+  const nextJson = JSON.stringify(next);
+  if (previousJson !== nextJson) {
+    chapter.progressState = next;
+    chapter.progressStateUpdatedAt = new Date().toISOString();
+  } else if (!chapter.progressState) {
+    chapter.progressState = next;
+  }
+  return chapter.progressState;
+}
+
+function refreshAllProgressStates(project = {}) {
+  const map = buildProjectProgressStateMap(project);
+  sortChaptersById(project.chapters || []).forEach((chapter) => {
+    const next = map.get(Number(chapter.id || 0)) || progressStateCore(extractChapterProgressState(chapter));
+    const previousJson = JSON.stringify(progressStateCore(chapter.progressState || {}));
+    const nextJson = JSON.stringify(next);
+    if (previousJson !== nextJson) {
+      chapter.progressState = next;
+      chapter.progressStateUpdatedAt = new Date().toISOString();
+    } else if (!chapter.progressState) {
+      chapter.progressState = next;
+    }
+  });
+}
+
+function formatProgressItem(item) {
+  if (!item || item.value === undefined || item.value === null) return "";
+  const prefix = item.from !== null && item.from !== undefined && item.from !== item.value
+    ? `${item.from}%→${item.value}%`
+    : `${item.value}%`;
+  return `${item.label || "数值"}${prefix}${item.inherited ? "（承接）" : ""}`;
+}
+
+function chapterProgressSummary(progressState = {}) {
+  return [progressState.trust, progressState.backlash, progressState.prediction]
+    .map(formatProgressItem)
+    .filter(Boolean)
+    .join("；");
+}
+
+function trustDropAllowedText(text = "") {
+  return /背叛|误会|失望|决裂|翻脸|信任崩塌|信任下降|信任跌|信任降低|关系破裂/.test(String(text || ""));
+}
+
+function buildNumericContinuityRules(project, chapter) {
+  const previous = previousChapterFor(project, chapter?.id);
+  const previousState = previous ? updateChapterProgressState(project, previous) : null;
+  const currentExplicit = extractChapterProgressState(chapter);
+  const currentState = updateChapterProgressState(project, chapter);
+  const rules = [];
+  if (previousState?.trust?.value !== undefined && previousState.trust.value !== null) {
+    const targetTrust = currentExplicit.trust?.value ?? currentState?.trust?.value ?? previousState.trust.value;
+    rules.push(`数值状态锁：上一章刘亦菲信任度最终为 ${previousState.trust.value}%，本章不得写低于 ${previousState.trust.value}%；除非细纲明确写“误会/背叛/信任崩塌”，否则只能持平或上升。`);
+    if (targetTrust > previousState.trust.value) {
+      rules.push(`本章信任度推进目标：刘亦菲信任度 ${previousState.trust.value}%→${targetTrust}%，提升必须由电话兑现、试镜机会、事业结果或陈玄的实际行动造成。`);
+    }
+  }
+  if (previousState?.backlash?.value !== undefined && previousState.backlash.value !== null) {
+    rules.push(`反噬值承接：上一章最终反噬约 ${previousState.backlash.value}%，本章写反噬变化时必须接住这个数值，不要凭空回到低位。`);
+  }
+  if (currentExplicit.backlash?.value !== undefined && currentExplicit.backlash.value !== null) {
+    rules.push(`本章反噬目标：按细纲落到 ${currentExplicit.backlash.value}%。`);
+  }
+  if (currentExplicit.prediction?.value !== undefined && currentExplicit.prediction.value !== null) {
+    rules.push(`本章预言进度：按细纲写到 ${currentExplicit.prediction.value}%，只能用可见结果兑现，不要口头宣布完成。`);
+  }
+  return rules;
+}
+
+function numericContinuityIssues(project, chapter, text = "", currentDetailText = "") {
+  const issues = [];
+  const previous = previousChapterFor(project, chapter?.id);
+  if (!previous) return issues;
+  const previousState = updateChapterProgressState(project, previous);
+  if (previousState?.trust?.value === undefined || previousState.trust.value === null) return issues;
+  const currentTextState = extractChapterProgressState({
+    ...chapter,
+    manuscript: text || chapter?.manuscript || "",
+    detailedOutline: chapter?.detailedOutline,
+  });
+  const currentValue = currentTextState.trust?.value;
+  if (currentValue === undefined || currentValue === null) return issues;
+  const allowedContext = `${currentDetailText}\n${text}\n${chapter?.outline || ""}`;
+  if (currentValue < previousState.trust.value && !trustDropAllowedText(allowedContext)) {
+    issues.push({
+      type: "数值连续性",
+      level: "高",
+      text: `信任度倒退：上一章刘亦菲信任度为 ${previousState.trust.value}%，本章写成 ${currentValue}%。`,
+      fix: "改成本章信任度持平或上升；如果确实要下降，必须先在细纲写清误会/背叛/信任崩塌的剧情原因。",
+    });
+  }
+  return issues;
 }
 
 function formatWordCount(count = 0) {
@@ -888,7 +1137,10 @@ function buildChapterGenerationPrompt(project, chapter, detail) {
   const goldFingerRules = buildGoldFingerRules(project);
   const continuity = buildChapterContinuityMemory(project, chapter);
   const sceneLines = (detail?.scenes || [])
-    .map((scene, index) => `${index + 1}. ${scene.title}：目标 ${scene.words || 500} 字，${scene.content}`)
+    .map((scene, index) => {
+      const systemLines = (scene.systemLines || []).length ? `（系统线：${scene.systemLines.join("；")}）` : "";
+      return `${index + 1}. ${scene.title}：目标 ${scene.words || 500} 字，${scene.content}${systemLines}`;
+    })
     .join("\n");
   return [
     `你是中文网文正文生成模型。请为《${project.title}》生成第 ${chapter.id} 章《${chapter.title}》。`,
@@ -1816,10 +2068,10 @@ function buildLiuyifeiEarlyOutline(row, chapterNumber, goldFingerPowers = []) {
     },
     3: {
       title: "这张脸就是天赋",
-      core: "试镜电话兑现 → 反噬升到80% → 陈玄决定北上",
+      core: "试镜电话兑现 → 信任度55%升到70% → 反噬升到80% → 陈玄决定北上",
       opening: "陈玄烧了一整夜。第二天房东敲门要房租时，他差点没从床上爬起来。",
       scenes: [
-        { title: "电话来了", words: 700, content: "第三天下午，刘亦菲家的电话响起。《金粉世家》选角组邀请她去北京试镜。她挂掉电话就跑到巷口，喊电话真的来了。陈玄脸色发白，只说小感冒。", systemLines: ["【预言完成80%】", "→ 试镜通过率提升至95%", "→ 反噬值：65%→80%"] },
+        { title: "电话来了", words: 700, content: "第三天下午，刘亦菲家的电话响起。《金粉世家》选角组邀请她去北京试镜。她挂掉电话就跑到巷口，喊电话真的来了。陈玄脸色发白，只说小感冒。电话兑现把她的信任从上一章的55%推到70%。", systemLines: ["【信任度：55%→70%】", "【预言完成80%】", "→ 试镜通过率提升至95%", "→ 反噬值：65%→80%"] },
         { title: "反噬大爆发", words: 500, content: "晚上陈玄在公共厕所吐了一次。系统建议寻找其他高好感度成年异性稀释反噬，但他现在除了刘亦菲谁都不认识。", systemLines: ["【反噬值：80%】", "→ 24小时后触发不可逆伤害", "→ 当前高星运目标未满18周岁，不可进行高级消除"] },
         { title: "事业型羁绊", words: 450, content: "系统给出事业型羁绊方案。陈玄盯着这四个字，决定必须让刘亦菲拿到角色，用事业结果稳定星运。", systemLines: ["【可建立事业型羁绊】", "→ 目标事业成功可降低反噬增长"] },
         { title: "决心北上", words: 550, content: "刘亦菲和母亲来告别。陈玄告诉她，到北京不要装别人，她的脸就是天赋。母女离开后，他把最后的钱交房租，收拾旧背包准备去北京。", systemLines: [] },
@@ -2007,6 +2259,7 @@ function migrateChapterOutline(chapter, project, force = false) {
   }
   chapter.title = chapter.title || chapter.detailedOutline.chapterTitle;
   chapter.outline = chapter.outline || rough.event || rough.target;
+  updateChapterProgressState(project, chapter);
 }
 
 function roughRowIncludesChapter(row, chapterId) {
@@ -2041,6 +2294,7 @@ function updateChapterFromRoughRow(project, chapter, row, { forceDetail = true }
   if (!chapter.manuscript) {
     chapter.title = buildChapterTitle(row, Number(chapter.id), start, end);
   }
+  updateChapterProgressState(project, chapter);
   chapter.generationPrompt = buildChapterGenerationPrompt(project, chapter, chapter.detailedOutline);
   chapter.generationContract = buildChapterGenerationContract(project, chapter);
 }
@@ -2462,6 +2716,7 @@ async function saveCurrentDetailOutline() {
   chapter.detailedOutline = collectDetailedOutlineFromEditor(chapter.detailedOutline);
   if (!Array.isArray(chapter.detailedOutline)) {
     chapter.outline = chapter.detailedOutline.core || chapter.outline;
+    updateChapterProgressState(project, chapter);
     chapter.generationPrompt = buildChapterGenerationPrompt(project, chapter, chapter.detailedOutline);
     chapter.generationContract = buildChapterGenerationContract(project, chapter);
   }
@@ -2900,6 +3155,7 @@ function renderContinuityMemory(memory) {
     memory.previousEnding ? ["上章尾声", memory.previousEnding] : null,
     memory.previousBridge ? ["接力要求", memory.previousBridge] : null,
     memory.currentNeed ? ["本章承接", memory.currentNeed] : null,
+    memory.progressLines?.length ? ["数值状态", memory.progressLines.join(" ｜ ")] : null,
     memory.roleLines?.length ? ["角色状态", memory.roleLines.join(" ｜ ")] : null,
     memory.openThreads?.length ? ["未收线索", memory.openThreads.join(" ｜ ")] : null,
   ].filter(Boolean);
@@ -2922,10 +3178,12 @@ function selectedChapter() {
 function editorMetaHtml(project, chapter) {
   const targetWords = activeTargetWords(project, chapter);
   const modelMeta = chapterModelMeta(chapter);
+  const progressSummary = chapterProgressSummary(updateChapterProgressState(project, chapter));
   return `
     <span>目标 ${targetWords} 字</span>
     <span>当前 ${chapterWordCount(chapter.manuscript || "")} 字</span>
     <span>粗纲：${chapter.roughOutline?.chapter || "-"}</span>
+    ${progressSummary ? `<span>数值：${escapeHtml(compactMemoryText(progressSummary, 80))}</span>` : ""}
     <span>文风：${project.styleStatus}</span>
     <span>评分：${chapter.score ? `${chapter.score} 分` : "未评分"}</span>
     <span>状态：${chapter.status}</span>
@@ -4395,6 +4653,7 @@ function auditChapterDraft(project, chapter) {
   if (missingClues.length) {
     issues.push({ type: "伏笔", level: "中", text: `伏笔未落到正文：${missingClues.join("、")}。`, fix: "补一处物件、提示框、台词或结果。" });
   }
+  issues.push(...numericContinuityIssues(project, chapter, text, currentDetailText));
   issues.push(...unsupportedContinuityFactIssues(project, chapter, text, currentDetailText));
   if (!/[？?。！!][\s\S]{0,120}$/.test(text)) {
     issues.push({ type: "钩子", level: "中", text: "结尾钩子不够明确。", fix: "用新问题、反噬提示、电话、门外来人或资源变化收尾。" });
@@ -4501,6 +4760,7 @@ function scoreCurrentChapter() {
   $("#manuscript").value = normalizedText;
   chapter.manuscript = normalizedText;
   chapter.wordCount = chapterWordCount(chapter.manuscript);
+  updateChapterProgressState(project, chapter);
   const targetWords = activeTargetWords(project, chapter);
   const audit = auditChapterDraft(project, chapter);
   chapter.scoreDetail = audit.detail;
@@ -4544,6 +4804,7 @@ async function completeCurrentChapter() {
   recordManualStyleRevision(project, chapter, previousText, nextText);
   chapter.manuscript = nextText;
   chapter.wordCount = chapterWordCount(chapter.manuscript);
+  updateChapterProgressState(project, chapter);
   const audit = auditChapterDraft(project, chapter);
   chapter.scoreDetail = audit.detail;
   chapter.score = audit.score;
@@ -5039,6 +5300,7 @@ async function generateCopy() {
     chapter.styleRevisionStatus = "未修改";
     chapter.wordCount = chapterWordCount(chapter.manuscript);
     chapter.progress = Math.min(99, Math.round((chapter.wordCount / targetWords) * 100));
+    updateChapterProgressState(project, chapter);
     refreshChapterStorySnapshot(project, chapter);
     const nextChapter = nextChapterFor(project, chapter.id);
     if (nextChapter) refreshProjectStoryMemory(project, nextChapter);
@@ -5056,6 +5318,7 @@ async function generateCopy() {
       calledAt: new Date().toISOString(),
     };
     chapter.manuscript = previousManuscript;
+    updateChapterProgressState(project, chapter);
     refreshChapterStorySnapshot(project, chapter);
     refreshProjectStoryMemory(project, chapter);
     $("#manuscript").value = chapter.manuscript;
@@ -5119,6 +5382,7 @@ function syncCurrentManuscript({ persist = true, toast = false } = {}) {
   chapter.manuscript = normalizedText;
   chapter.wordCount = chapterWordCount(chapter.manuscript);
   chapter.progress = Math.min(99, Math.round((chapter.wordCount / targetWords) * 100));
+  updateChapterProgressState(project, chapter);
   project.words = projectWordCount(project);
   refreshChapterStorySnapshot(project, chapter);
   const nextChapter = nextChapterFor(project, chapter.id);
@@ -5376,6 +5640,13 @@ async function boot() {
   bindEvents();
   const loaded = await loadPersistentState();
   persistenceReady = true;
+  (state.projects || []).forEach((project) => {
+    const active = (project.chapters || []).find((chapter) => Number(chapter.id) === Number(state.activeChapterId || project.currentChapter))
+      || (project.chapters || [])[0];
+    if (active) updateChapterProgressState(project, active);
+    const previous = active ? previousChapterFor(project, active.id) : null;
+    if (previous) updateChapterProgressState(project, previous);
+  });
   renderAll();
   if (loaded) showToast("已从本地数据库恢复工作台。");
   saveStateSoon("boot");
