@@ -325,6 +325,20 @@ function ensureStyleControls(project) {
     project.deepseekDeAiPromptLibrary = DEEPSEEK_DE_AI_PROMPT_LIBRARY.map((item) => ({ ...item }));
     project.deepseekDeAiPromptLibraryVersion = "deepseek-deai-v1";
   }
+  if (isEntertainmentProject(project)) {
+    if (!Array.isArray(project.entertainmentStyleLibrary) || project.entertainmentStyleLibraryVersion !== ENTERTAINMENT_STYLE_LIBRARY_VERSION) {
+      project.entertainmentStyleLibrary = ENTERTAINMENT_STYLE_LIBRARY.map((item) => ({ ...item }));
+      project.entertainmentStyleLibraryVersion = ENTERTAINMENT_STYLE_LIBRARY_VERSION;
+    }
+    if (!Array.isArray(project.entertainmentMemeLibrary) || project.entertainmentMemeLibraryVersion !== ENTERTAINMENT_MEME_LIBRARY_VERSION) {
+      project.entertainmentMemeLibrary = ENTERTAINMENT_VIRAL_MEME_LIBRARY.map((item) => ({ ...item }));
+      project.entertainmentMemeLibraryVersion = ENTERTAINMENT_MEME_LIBRARY_VERSION;
+    }
+    if (!Array.isArray(project.entertainmentMemeRules) || project.entertainmentMemeRulesVersion !== ENTERTAINMENT_MEME_RULES_VERSION) {
+      project.entertainmentMemeRules = [...ENTERTAINMENT_MEME_RULES];
+      project.entertainmentMemeRulesVersion = ENTERTAINMENT_MEME_RULES_VERSION;
+    }
+  }
 }
 
 function styleTagRules(project) {
@@ -358,6 +372,24 @@ function deepSeekDeAiRules(project) {
   return (project?.deepseekDeAiPromptLibrary || DEEPSEEK_DE_AI_PROMPT_LIBRARY)
     .filter((item) => item && item.title !== "DeepSeek 参数建议")
     .map((item) => `DeepSeek去AI味｜${item.title}：${item.prompt}`);
+}
+
+function entertainmentStyleRules(project) {
+  ensureStyleControls(project);
+  if (!isEntertainmentProject(project)) return [];
+  const styleItems = (project?.entertainmentStyleLibrary?.length ? project.entertainmentStyleLibrary : ENTERTAINMENT_STYLE_LIBRARY)
+    .filter(Boolean)
+    .slice(0, 10);
+  const memeItems = (project?.entertainmentMemeLibrary?.length ? project.entertainmentMemeLibrary : ENTERTAINMENT_VIRAL_MEME_LIBRARY)
+    .filter(Boolean)
+    .slice(0, 14);
+  const memeRules = project?.entertainmentMemeRules?.length ? project.entertainmentMemeRules : ENTERTAINMENT_MEME_RULES;
+  return [
+    "娱乐圈爽文联网文风：主叙述保持大白话和人物行动，热搜、弹幕、评论、粉丝群、营销号标题只能作为剧情反馈载体，不能替代剧情本身。",
+    `娱乐圈文风模块：${styleItems.map((item) => `${item.title}｜${item.detail}`).join("；")}`,
+    `爆梗使用总则：${memeRules.join("；")}`,
+    `可用爆梗入口：${memeItems.map((item) => `${item.title}｜${item.detail}`).join("；")}`,
+  ];
 }
 
 function currentProject() {
@@ -1115,6 +1147,7 @@ function combinedGenerationRules(project) {
   const fusionRules = styleFusionRules(project);
   const tagRules = styleTagRules(project);
   const deepSeekRules = deepSeekDeAiRules(project);
+  const entertainmentRules = entertainmentStyleRules(project);
   const learned = Array.isArray(project?.learnedRules) ? project.learnedRules : [];
   const revisionRules = (project?.styleRevisionSamples || []).length
     ? [
@@ -1134,6 +1167,7 @@ function combinedGenerationRules(project) {
     ...characterDepthRules(),
     ...fusionRules,
     ...tagRules,
+    ...entertainmentRules,
     ...deepSeekRules,
     ...learned.filter((rule) => !wordRules.includes(rule)),
     ...revisionRules,
@@ -2603,6 +2637,128 @@ const ENTERTAINMENT_PATTERNS = [
   { title: "爽点后果", detail: "每次打脸都要带来资源、口碑、关系或敌人升级，不能只写全网震惊。" },
 ];
 
+const ENTERTAINMENT_STYLE_LIBRARY_VERSION = "entertainment-style-v1";
+const ENTERTAINMENT_MEME_LIBRARY_VERSION = "entertainment-meme-v2";
+const ENTERTAINMENT_MEME_RULES_VERSION = "entertainment-meme-rules-v1";
+
+const ENTERTAINMENT_STYLE_LIBRARY = [
+  {
+    title: "热搜切片式叙事",
+    source: "娱乐圈爽文阅读反馈整理",
+    detail: "用词条标题、截图编号、转评节奏和澄清发布时间推进，不让人物站在原地解释来龙去脉。",
+  },
+  {
+    title: "后台监视器爽点",
+    source: "综艺/直播爽点套路",
+    detail: "把关键结果放到导演组监视器、耳返、实时弹幕、后采室和经纪人群，让围观者同步改变态度。",
+  },
+  {
+    title: "资源可视化",
+    source: "娱乐产业场景规则",
+    detail: "试镜顺位、合同条款、品牌 brief、排播页、座位表、宣发预算都要变成可见战利品。",
+  },
+  {
+    title: "粉丝路人双反馈",
+    source: "饭圈/路人评论双线",
+    detail: "粉丝群负责控评和护盘，路人评论负责反转和扩散，二者观点要互相打架，不能同声合唱。",
+  },
+  {
+    title: "轻喜剧反差",
+    source: "娱乐圈沙雕爽文套路",
+    detail: "主角嘴上穷、手上稳，女明星先怀疑再跟赌，笑点来自场合反差和结果落地，不靠段子堆叠。",
+  },
+  {
+    title: "公关翻车链",
+    source: "舆论战爽点",
+    detail: "对手每压一次热度，都要留下新证据、新截图或新利益方，让反击一层层升级。",
+  },
+  {
+    title: "事业暧昧并行",
+    source: "可发表情感张力",
+    detail: "暧昧只写成年人和自愿边界，落点放在通告同框、资源互保、公开危机和第二天关系变化。",
+  },
+  {
+    title: "年代媒介适配",
+    source: "行业年份锚点",
+    detail: "2002-2008 用门户、论坛、纸媒、短信投票；2010-2017 用微博热搜和粉丝站；2018 后再用短视频、直播、弹幕。",
+  },
+];
+
+const ENTERTAINMENT_MEME_RULES = [
+  "同一章最多 1-2 个网络梗，且必须服务反转、打脸、控评或角色关系推进。",
+  "主叙述不玩梗，梗优先放在弹幕、评论区、粉丝群、营销号标题、综艺后采和工作人员吐槽里。",
+  "早年章节不得乱放现代热梗；过期梗只允许作为对应年代的网友语言或配角吐槽。",
+  "禁用低俗擦边、辱骂黑话和未成年人暧昧梗，亲密张力按可发表尺度规则处理。",
+];
+
+const ENTERTAINMENT_VIRAL_MEME_LIBRARY = [
+  {
+    title: "情绪价值",
+    source: "2025 年度网络用语",
+    detail: "用于粉丝/路人评价角色带来的陪伴感和爽感，落点写成评论转向、路人口碑回升或女星信任增加。",
+  },
+  {
+    title: "电子榨菜",
+    source: "2024 年度网络用语",
+    detail: "用于综艺片段、花絮、直播回放成为下饭讨论点，只能做网友反馈，不让旁白说这章很下饭。",
+  },
+  {
+    title: "显眼包",
+    source: "2024 年度网络用语",
+    detail: "用于综艺或红毯里被镜头抓到的反差行为，适合配角/对手出糗，别让主角长期装疯卖傻。",
+  },
+  {
+    title: "松弛感",
+    source: "2024 年度网络用语",
+    detail: "用于女明星在公开场合反压舆论：她不急着辩解，而是等证据和结果自己落地。",
+  },
+  {
+    title: "上桌",
+    source: "娱乐圈资源梗",
+    detail: "用于咖位和资源变化：从候补、陪跑、边角料到正式座位、主推名单、品牌会议桌。",
+  },
+  {
+    title: "破防",
+    source: "弹幕/评论高频表达",
+    detail: "只写网友、对手或粉丝的反应，不用“粉丝破防”当模板句；要配具体行为，比如删博、撤热搜、改话术。",
+  },
+  {
+    title: "硬控",
+    source: "弹幕/短视频语境",
+    detail: "用于舞台、试镜、镜头片段把观众留住，正文要写具体动作和反馈，不能只说她硬控全场。",
+  },
+  {
+    title: "主打一个",
+    source: "2024 网络语感",
+    detail: "适合评论区轻松吐槽，比如主打一个嘴硬、主打一个临场改命；不要放进正经旁白。",
+  },
+  {
+    title: "偏偏你最争气",
+    source: "2024 年度网络用语",
+    detail: "用于粉丝护盘失败后的反转时刻，适合放在超话、弹幕或站姐图文里，形成小高潮。",
+  },
+  {
+    title: "含金量还在上升",
+    source: "2024 年度网络用语",
+    detail: "用于旧作品、旧预言、旧选择被新结果反复证明，让爽点从当场打脸延伸到后续章节。",
+  },
+  {
+    title: "千百次练习只为这一刻",
+    source: "2025 年度网络用语",
+    detail: "用于试镜、唱跳、舞台或武打成果兑现，必须先铺训练和代价，再让镜头或评委给结果。",
+  },
+  {
+    title: "全网嘴硬到沉默",
+    source: "爽文评论区改写",
+    detail: "替代“全网震惊/热搜爆了”，先写嘲讽口径，再写证据落地后评论停顿、转向和删评。",
+  },
+  {
+    title: "接",
+    source: "2024 B站年度弹幕",
+    detail: "用于弹幕和评论区接好运、接资源、接试镜成功，适合在结果兑现后刷屏，不放进旁白。",
+  },
+];
+
 const DEEPSEEK_DE_AI_PROMPT_LIBRARY = [
   {
     title: "角色锁定：不是润色器",
@@ -3624,6 +3780,8 @@ function buildImportedProject(text, sourceName = "") {
           ...generationWordRules(2200),
           "热搜、综艺、试镜、红毯、合同和宣发群必须至少落到一个具体场景。",
           "少写全网震惊，多写弹幕、后台监视器、通告单和品牌 brief 的具体反应。",
+          "爆梗只放在评论区、弹幕、粉丝群、营销号标题和后采里，同章最多 1-2 个，不能替代剧情。",
+          "按年代适配媒介：早年用论坛、纸媒、短信投票，现代章节再用短视频、直播、弹幕和热梗。",
           "暧昧只写成年人和明确自愿，亲密镜头留白，重点写第二天的关系变化。",
           "生成前检查禁词：眸光、勾唇、全网炸了、杀疯了、气场全开等模板词。",
         ]
@@ -3646,6 +3804,12 @@ function buildImportedProject(text, sourceName = "") {
     storyRoutes: entertainmentPreset ? STORY_ROUTE_LIBRARY : [],
     deepseekDeAiPromptLibrary: DEEPSEEK_DE_AI_PROMPT_LIBRARY.map((item) => ({ ...item })),
     deepseekDeAiPromptLibraryVersion: "deepseek-deai-v1",
+    entertainmentStyleLibrary: entertainmentPreset ? ENTERTAINMENT_STYLE_LIBRARY.map((item) => ({ ...item })) : [],
+    entertainmentStyleLibraryVersion: entertainmentPreset ? ENTERTAINMENT_STYLE_LIBRARY_VERSION : "",
+    entertainmentMemeLibrary: entertainmentPreset ? ENTERTAINMENT_VIRAL_MEME_LIBRARY.map((item) => ({ ...item })) : [],
+    entertainmentMemeLibraryVersion: entertainmentPreset ? ENTERTAINMENT_MEME_LIBRARY_VERSION : "",
+    entertainmentMemeRules: entertainmentPreset ? [...ENTERTAINMENT_MEME_RULES] : [],
+    entertainmentMemeRulesVersion: entertainmentPreset ? ENTERTAINMENT_MEME_RULES_VERSION : "",
     parseWarnings: outlineRows.length <= 1 ? ["未识别到完整章节表，已生成兜底节点。"] : [],
   };
 }
@@ -5089,6 +5253,7 @@ function renderSkills() {
     { name: "番茄小白文", task: "正文生成 / 评分", desc: "句子短，信息直给，行动推动爽点。", active: true },
     { name: "文风学习器", task: "样章分析", desc: "从样章提取句长、节奏、对话比例和禁忌表达。", active: true },
     { name: "娱乐圈爽文", task: "题材模板", desc: "舆论反转、资源压制、热搜节点和粉丝反馈。", active: isEntertainmentProject(project) },
+    { name: "联网文风与爆梗库", task: "章节正文 / 改写", desc: "把年度热梗做成弹幕、评论、热搜词条和综艺反馈，不把梗塞进旁白。", active: isEntertainmentProject(project) },
     { name: "可发表暧昧张力", task: "尺度审查", desc: "成年人、自愿、留白转场、写后果，不写露骨动作和身体细节。", active: isEntertainmentProject(project) },
     { name: "娱乐圈去 AI 味", task: "改写 / 评分", desc: "用通告单、品牌 brief、试镜、宣发群、后台监视器等具体物件替代模板腔。", active: true },
     { name: "DeepSeek 去 AI 味提示词", task: "章节正文 / 去 AI 改写", desc: "联网整理的分层提示：角色锁定、内部四步、解释腔硬删、事实保护。", active: true },
@@ -5113,14 +5278,45 @@ function renderSkills() {
     .map(
       (item) => `
         <article class="research-card">
-          <strong>${item.title}</strong>
-          <span>${item.detail}</span>
+          <strong>${escapeHtml(item.title)}</strong>
+          <span>${escapeHtml(item.detail)}</span>
         </article>
       `,
     )
     .join("");
+  const styleLibrary = project.entertainmentStyleLibrary?.length ? project.entertainmentStyleLibrary : ENTERTAINMENT_STYLE_LIBRARY;
+  const styleList = $("#entertainment-style-list");
+  if (styleList) {
+    styleList.innerHTML = styleLibrary
+      .map((item) => `
+        <article class="research-card">
+          <strong>${escapeHtml(item.title)}</strong>
+          <em>${escapeHtml(item.source || "联网整理")}</em>
+          <span>${escapeHtml(item.detail)}</span>
+        </article>
+      `)
+      .join("");
+  }
+  const memeRules = $("#entertainment-meme-rule-list");
+  if (memeRules) {
+    const rules = project.entertainmentMemeRules?.length ? project.entertainmentMemeRules : ENTERTAINMENT_MEME_RULES;
+    memeRules.innerHTML = rules.map((rule) => `<li>${escapeHtml(rule)}</li>`).join("");
+  }
+  const memeList = $("#entertainment-meme-list");
+  if (memeList) {
+    const memeLibrary = project.entertainmentMemeLibrary?.length ? project.entertainmentMemeLibrary : ENTERTAINMENT_VIRAL_MEME_LIBRARY;
+    memeList.innerHTML = memeLibrary
+      .map((item) => `
+        <article class="research-card">
+          <strong>${escapeHtml(item.title)}</strong>
+          <em>${escapeHtml(item.source || "联网整理")}</em>
+          <span>${escapeHtml(item.detail)}</span>
+        </article>
+      `)
+      .join("");
+  }
   $("#romance-rule-list").innerHTML = (project.romanceRules?.length ? project.romanceRules : PUBLISHABLE_ROMANCE_RULES)
-    .map((rule) => `<li>${rule}</li>`)
+    .map((rule) => `<li>${escapeHtml(rule)}</li>`)
     .join("");
   renderForbiddenWordManager("#skill-forbidden-list");
   $("#story-route-list").innerHTML = (project.storyRoutes?.length ? project.storyRoutes : STORY_ROUTE_LIBRARY)
@@ -5840,6 +6036,12 @@ async function trainStyle() {
     project.storyRoutes = STORY_ROUTE_LIBRARY;
     project.deepseekDeAiPromptLibrary = DEEPSEEK_DE_AI_PROMPT_LIBRARY.map((item) => ({ ...item }));
     project.deepseekDeAiPromptLibraryVersion = "deepseek-deai-v1";
+    project.entertainmentStyleLibrary = ENTERTAINMENT_STYLE_LIBRARY.map((item) => ({ ...item }));
+    project.entertainmentStyleLibraryVersion = ENTERTAINMENT_STYLE_LIBRARY_VERSION;
+    project.entertainmentMemeLibrary = ENTERTAINMENT_VIRAL_MEME_LIBRARY.map((item) => ({ ...item }));
+    project.entertainmentMemeLibraryVersion = ENTERTAINMENT_MEME_LIBRARY_VERSION;
+    project.entertainmentMemeRules = [...ENTERTAINMENT_MEME_RULES];
+    project.entertainmentMemeRulesVersion = ENTERTAINMENT_MEME_RULES_VERSION;
   }
   renderAll();
   await saveStateNowWithMessage("train-style", `文风画像已重新训练：${analysis.sampleCount} 组样文，${analysis.totalChars} 字，置信度 ${analysis.confidence}%。`);

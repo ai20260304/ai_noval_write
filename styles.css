@@ -1912,13 +1912,27 @@ select:focus {
 
 .background-card span,
 .background-card em,
-.research-card span {
+.research-card span,
+.research-card em {
   color: var(--muted);
   line-height: 1.55;
 }
 
-.background-card em {
+.background-card em,
+.research-card em {
   font-style: normal;
+}
+
+.source-list .research-card {
+  gap: 5px;
+}
+
+.source-list .research-card em {
+  font-size: 11px;
+}
+
+.compact-rule-list {
+  padding-bottom: 0;
 }
 
 .skill-extra-grid {
