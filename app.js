@@ -2,6 +2,7 @@ const state = {
   activeProjectId: "apocalypse",
   activeChapterId: 126,
   activeChapterFilter: "todo",
+  detailOutlineSearch: "",
   pendingImportProjectId: null,
   loadedStateUpdatedAt: null,
   projects: [
@@ -3709,11 +3710,11 @@ function outlineSummary(detail) {
   ].filter(Boolean).join("<br>");
 }
 
-function renderDetailedOutline(detail) {
+function renderDetailedOutline(detail, { formId = "detail-outline-form" } = {}) {
   if (!detail) return `<p class="muted">暂无本章细纲。</p>`;
   if (Array.isArray(detail)) {
     return `
-      <div class="detail-outline-editor" id="detail-outline-form">
+      <div class="detail-outline-editor" id="${escapeHtml(formId)}">
         <label>
           <span>细纲内容</span>
           <textarea data-outline-field="legacy">${escapeHtml(detail.join("\n"))}</textarea>
@@ -3742,7 +3743,7 @@ function renderDetailedOutline(detail) {
     .join("");
 
   return `
-    <div class="detail-outline-editor" id="detail-outline-form">
+    <div class="detail-outline-editor" id="${escapeHtml(formId)}">
       <label>
         <span>时间</span>
         <input data-outline-field="time" value="${escapeHtml(detail.time || "")}" />
@@ -3781,15 +3782,17 @@ function renderDetailedOutline(detail) {
   `;
 }
 
-function readOutlineField(name) {
-  return $(`[data-outline-field="${name}"]`)?.value?.trim() || "";
+function readOutlineField(name, root = document) {
+  return $(`[data-outline-field="${name}"]`, root)?.value?.trim() || "";
 }
 
-function collectDetailedOutlineFromEditor(existing = {}) {
-  const legacy = readOutlineField("legacy");
+function collectDetailedOutlineFromEditor(existing = {}, root = "#chapter-detail-outline") {
+  const container = typeof root === "string" ? $(root) : root;
+  if (!container) return existing || {};
+  const legacy = readOutlineField("legacy", container);
   if (legacy) return legacy.split(/\n+/).map((line) => line.trim()).filter(Boolean);
 
-  const scenes = $$("#chapter-detail-outline [data-outline-scene]").map((node, index) => {
+  const scenes = $$("[data-outline-scene]", container).map((node, index) => {
     const title = $("[data-scene-field='title']", node)?.value?.trim() || `场景${index + 1}`;
     const words = Number($("[data-scene-field='words']", node)?.value) || 500;
     const content = $("[data-scene-field='content']", node)?.value?.trim() || "";
@@ -3803,24 +3806,65 @@ function collectDetailedOutlineFromEditor(existing = {}) {
   return {
     ...(existing || {}),
     version: CURRENT_DETAIL_OUTLINE_VERSION,
-    time: readOutlineField("time"),
-    place: readOutlineField("place"),
-    core: readOutlineField("core"),
-    sourceNode: readOutlineField("sourceNode") || existing?.sourceNode || "",
-    powerFocus: readOutlineField("powerFocus") || existing?.powerFocus || goldFingerPowerNames().join(" / "),
-    opening: readOutlineField("opening"),
+    time: readOutlineField("time", container),
+    place: readOutlineField("place", container),
+    core: readOutlineField("core", container),
+    sourceNode: readOutlineField("sourceNode", container) || existing?.sourceNode || "",
+    powerFocus: readOutlineField("powerFocus", container) || existing?.powerFocus || goldFingerPowerNames().join(" / "),
+    opening: readOutlineField("opening", container),
     scenes,
-    requirements: readOutlineField("requirements").split(/\n+/).map((line) => line.trim()).filter(Boolean),
-    hook: readOutlineField("hook"),
+    requirements: readOutlineField("requirements", container).split(/\n+/).map((line) => line.trim()).filter(Boolean),
+    hook: readOutlineField("hook", container),
     editedAt: new Date().toISOString(),
   };
 }
 
-function markDetailOutlineDirty(isDirty = true) {
-  const button = $("#save-detail-outline");
+function markDetailOutlineDirty(isDirty = true, source = "writer") {
+  const button = source === "center" ? $("#save-detail-outline-center") : $("#save-detail-outline");
   if (!button) return;
   button.classList.toggle("dirty", isDirty);
   button.textContent = isDirty ? "保存细纲*" : "保存细纲";
+}
+
+function applyDetailedOutlineEdit(project, chapter, nextDetail, { source = "writer" } = {}) {
+  if (!project || !chapter) return null;
+  chapter.detailedOutline = nextDetail;
+  if (!Array.isArray(chapter.detailedOutline)) {
+    chapter.outline = chapter.detailedOutline.core || chapter.outline;
+    updateChapterProgressState(project, chapter);
+    chapter.generationPrompt = buildChapterGenerationPrompt(project, chapter, chapter.detailedOutline);
+    chapter.generationContract = buildChapterGenerationContract(project, chapter);
+  }
+  chapter.detailOutlineEditedAt = new Date().toISOString();
+  refreshChapterStorySnapshot(project, chapter);
+  refreshChapterFactCache(project, chapter);
+  applyContinuityGate(project, chapter);
+  const continuity = refreshProjectStoryMemory(project, chapter);
+  createChapterVersionSnapshot(
+    project,
+    chapter,
+    source === "center" ? "细纲中心保存快照" : "细纲保存快照",
+    { reason: source === "center" ? "detail-outline-center" : "detail-outline" },
+  );
+  project.detailOutlineUpdatedAt = chapter.detailOutlineEditedAt;
+  return continuity;
+}
+
+function refreshDetailOutlineViews(project, chapter) {
+  if (!chapter) return;
+  renderOutline();
+  renderDetailOutlineCenter();
+  renderChapters(chapter.id);
+  if (Number(selectedChapter()?.id || 0) === Number(chapter.id || 0)) {
+    $("#chapter-outline").textContent = chapter.outline || "";
+    $("#chapter-detail-outline").innerHTML = renderDetailedOutline(chapter.detailedOutline);
+    const continuity = chapter.continuityMemory || refreshProjectStoryMemory(project, chapter);
+    $("#chapter-continuity").innerHTML = renderContinuityMemory(continuity) + renderContinuityGate(chapter);
+    $("#editor-meta").innerHTML = editorMetaHtml(project, chapter);
+    renderChapterVersions(chapter);
+    renderChapterScore(chapter);
+  }
+  refreshIcons();
 }
 
 async function saveCurrentDetailOutline() {
@@ -3830,20 +3874,11 @@ async function saveCurrentDetailOutline() {
     showToast("当前没有可保存的章节细纲。");
     return;
   }
-  chapter.detailedOutline = collectDetailedOutlineFromEditor(chapter.detailedOutline);
-  if (!Array.isArray(chapter.detailedOutline)) {
-    chapter.outline = chapter.detailedOutline.core || chapter.outline;
-    updateChapterProgressState(project, chapter);
-    chapter.generationPrompt = buildChapterGenerationPrompt(project, chapter, chapter.detailedOutline);
-    chapter.generationContract = buildChapterGenerationContract(project, chapter);
-  }
-  chapter.detailOutlineEditedAt = new Date().toISOString();
-  applyContinuityGate(project, chapter);
-  const continuity = refreshProjectStoryMemory(project, chapter);
-  $("#chapter-continuity").innerHTML = renderContinuityMemory(continuity) + renderContinuityGate(chapter);
+  const nextDetail = collectDetailedOutlineFromEditor(chapter.detailedOutline, "#chapter-detail-outline");
+  applyDetailedOutlineEdit(project, chapter, nextDetail, { source: "writer" });
   markDetailOutlineDirty(false);
-  renderChapters(chapter.id);
-  createChapterVersionSnapshot(project, chapter, "细纲保存快照", { reason: "detail-outline" });
+  markDetailOutlineDirty(false, "center");
+  refreshDetailOutlineViews(project, chapter);
   scheduleProductionSync("save-detail-outline");
   await saveStateNowWithMessage("save-detail-outline", `第 ${chapter.id} 章细纲已保存。`);
 }
@@ -3888,8 +3923,136 @@ function editChapterOutlineFromDirectory(chapterId) {
   const id = Number(chapterId);
   if (!Number.isFinite(id)) return;
   selectChapter(id);
-  switchPage("writer");
-  window.setTimeout(() => $("#chapter-detail-outline")?.scrollIntoView({ block: "start", behavior: "smooth" }), 0);
+  switchPage("detail-outlines");
+  window.setTimeout(() => $("#detail-outline-center-editor")?.scrollIntoView({ block: "start", behavior: "smooth" }), 0);
+}
+
+function detailOutlineSearchText(chapter) {
+  const detail = chapter?.detailedOutline;
+  const detailText = Array.isArray(detail)
+    ? detail.join(" ")
+    : [
+        detail?.time,
+        detail?.place,
+        detail?.core,
+        detail?.sourceNode,
+        detail?.opening,
+        ...(detail?.scenes || []).flatMap((scene) => [scene.title, scene.content, ...(scene.systemLines || [])]),
+        ...(detail?.requirements || []),
+        detail?.hook,
+      ].filter(Boolean).join(" ");
+  return [
+    chapter?.id,
+    chapter?.title,
+    chapter?.outline,
+    chapter?.roughOutline?.chapter,
+    chapter?.roughOutline?.target,
+    chapter?.roughOutline?.event,
+    chapter?.roughOutline?.clue,
+    detailText,
+  ].filter(Boolean).join(" ").toLowerCase();
+}
+
+function detailOutlineSummaryText(detail) {
+  if (!detail) return "暂无细纲";
+  if (Array.isArray(detail)) return compactMemoryText(detail.join(" / "), 96);
+  const scenes = (detail.scenes || [])
+    .slice(0, 2)
+    .map((scene) => scene.title)
+    .filter(Boolean)
+    .join(" / ");
+  return compactMemoryText([detail.core, scenes, detail.hook].filter(Boolean).join(" → "), 120) || "暂无细纲";
+}
+
+function renderDetailOutlineCenter() {
+  const project = currentProject();
+  const chapters = project.chapters || [];
+  const selected = selectedChapter();
+  const query = (state.detailOutlineSearch || "").trim().toLowerCase();
+  const matched = query ? chapters.filter((chapter) => detailOutlineSearchText(chapter).includes(query)) : chapters;
+  const windowed = chapterWindow(matched, state.activeChapterId, 180);
+  const listCount = $("#detail-outline-list-count");
+  if (listCount) listCount.textContent = `${matched.length} / ${chapters.length} 章`;
+  const summary = $("#detail-outline-project-summary");
+  if (summary) summary.textContent = chapters.length ? `《${project.title}》共 ${chapters.length} 章，当前第 ${selected?.id || "-"} 章` : "当前项目还没有章节计划";
+  const search = $("#detail-outline-search");
+  if (search && search.value !== (state.detailOutlineSearch || "")) search.value = state.detailOutlineSearch || "";
+
+  const list = $("#detail-outline-center-list");
+  if (list) {
+    const rangeNote = windowed.total > windowed.items.length
+      ? `<div class="chapter-list-note">显示 ${windowed.start + 1}-${windowed.start + windowed.items.length} / ${windowed.total} 章，搜索后只渲染命中章节。</div>`
+      : "";
+    list.innerHTML = !chapters.length
+      ? `<div class="empty-chapter-list">导入大纲或新建章节后，这里会按项目显示细纲。</div>`
+      : !matched.length
+        ? `<div class="empty-chapter-list">没有匹配的章节细纲。</div>`
+        : rangeNote + windowed.items.map((chapter) => `
+          <button class="detail-center-item ${Number(chapter.id) === Number(state.activeChapterId) ? "active" : ""}" data-detail-outline-chapter="${chapter.id}" type="button">
+            <strong>第 ${chapter.id} 章 ${escapeHtml(chapter.title || "未命名")}</strong>
+            <span>${escapeHtml(chapter.roughOutline?.chapter || "-")} · ${escapeHtml(chapter.status || "待写")} · ${chapter.detailOutlineEditedAt ? "已人工编辑" : "自动细纲"}</span>
+            <em>${escapeHtml(detailOutlineSummaryText(chapter.detailedOutline))}</em>
+          </button>
+        `).join("");
+  }
+
+  const heading = $("#detail-outline-center-heading");
+  const meta = $("#detail-outline-center-meta");
+  const rough = $("#detail-outline-center-rough");
+  const editor = $("#detail-outline-center-editor");
+  if (!selected) {
+    if (heading) heading.textContent = "等待章节计划";
+    if (meta) meta.textContent = "导入大纲后自动生成章节细纲";
+    if (rough) rough.textContent = "暂无本章粗纲。";
+    if (editor) editor.innerHTML = `<p class="muted">暂无可编辑细纲。</p>`;
+    markDetailOutlineDirty(false, "center");
+    return;
+  }
+
+  if (heading) heading.textContent = `第 ${selected.id} 章 ${selected.title || "未命名"}`;
+  if (meta) {
+    meta.textContent = [
+      `状态：${selected.status || "待写"}`,
+      `目标：${activeTargetWords(project, selected)} 字`,
+      selected.detailOutlineEditedAt ? `细纲保存：${new Date(selected.detailOutlineEditedAt).toLocaleString("zh-CN", { hour12: false })}` : "细纲尚未人工保存",
+    ].join(" · ");
+  }
+  if (rough) {
+    rough.textContent = [
+      selected.roughOutline?.chapter ? `粗纲节点：${selected.roughOutline.chapter}` : "",
+      selected.roughOutline?.target ? `目标：${selected.roughOutline.target}` : "",
+      selected.roughOutline?.event ? `事件：${selected.roughOutline.event}` : selected.outline || "",
+      selected.roughOutline?.clue ? `伏笔：${selected.roughOutline.clue}` : "",
+    ].filter(Boolean).join("；") || "暂无本章粗纲。";
+  }
+  if (editor) editor.innerHTML = renderDetailedOutline(selected.detailedOutline, { formId: "detail-outline-center-form" });
+  markDetailOutlineDirty(false, "center");
+}
+
+function selectDetailOutlineChapter(id) {
+  const numericId = Number(id);
+  if (!Number.isFinite(numericId)) return;
+  state.activeChapterId = numericId;
+  renderDetailOutlineCenter();
+  renderChapters(numericId);
+  selectChapter(numericId);
+  saveStateSoon("select-detail-outline-chapter");
+}
+
+async function saveDetailOutlineFromCenter() {
+  const project = currentProject();
+  const chapter = selectedChapter();
+  if (!chapter) {
+    showToast("当前没有可保存的章节细纲。");
+    return;
+  }
+  const nextDetail = collectDetailedOutlineFromEditor(chapter.detailedOutline, "#detail-outline-center-editor");
+  applyDetailedOutlineEdit(project, chapter, nextDetail, { source: "center" });
+  markDetailOutlineDirty(false, "center");
+  markDetailOutlineDirty(false);
+  refreshDetailOutlineViews(project, chapter);
+  scheduleProductionSync("save-detail-outline-center");
+  await saveStateNowWithMessage("save-detail-outline-center", `第 ${chapter.id} 章细纲已从细纲中心保存，并同步到写作台。`);
 }
 
 async function importOutlineFromFile(file) {
@@ -3960,6 +4123,7 @@ function switchPage(pageId) {
     }
     window.setTimeout(() => loadProductionSummary({ silent: true }), 0);
   }
+  if (pageId === "detail-outlines") renderDetailOutlineCenter();
 }
 
 function renderProjectSelect() {
@@ -4192,6 +4356,13 @@ function chaptersForFilter(project, filter = state.activeChapterFilter || "todo"
   return chapters.filter((chapter) => chapter.status !== "完成" && !isReviewChapter(chapter));
 }
 
+function filterForChapter(chapter) {
+  if (!chapter) return state.activeChapterFilter || "todo";
+  if (chapter.status === "完成") return "done";
+  if (isReviewChapter(chapter)) return "review";
+  return "todo";
+}
+
 function chapterWindow(chapters, selectedId, limit = 240) {
   if (chapters.length <= limit) return { items: chapters, start: 0, total: chapters.length };
   const selectedIndex = chapters.findIndex((chapter) => chapter.id === selectedId);
@@ -4353,6 +4524,9 @@ function selectChapter(id) {
   state.activeChapterId = id;
   const project = currentProject();
   const chapter = selectedChapter();
+  if (chapter && !chaptersForFilter(project, state.activeChapterFilter || "todo").some((item) => Number(item.id) === Number(chapter.id))) {
+    state.activeChapterFilter = filterForChapter(chapter);
+  }
   renderChapters(id);
 
   if (!chapter) {
@@ -5457,6 +5631,7 @@ function renderAll() {
   renderCharacters();
   renderChapters(state.activeChapterId);
   selectChapter(state.activeChapterId);
+  renderDetailOutlineCenter();
   renderStylePage();
   renderSkills();
   renderModels();
@@ -6932,9 +7107,8 @@ async function generateCopy() {
   }
   const project = currentProject();
   const targetWords = activeTargetWords(project, chapter);
-  if ($("#detail-outline-form")) {
-    chapter.detailedOutline = collectDetailedOutlineFromEditor(chapter.detailedOutline);
-    chapter.detailOutlineEditedAt = new Date().toISOString();
+  if ($("#detail-outline-form", $("#chapter-detail-outline"))) {
+    applyDetailedOutlineEdit(project, chapter, collectDetailedOutlineFromEditor(chapter.detailedOutline, "#chapter-detail-outline"), { source: "writer" });
     markDetailOutlineDirty(false);
   }
   const detail = normalizeDraftOutline(project, chapter);
@@ -7254,6 +7428,22 @@ function bindEvents() {
     const button = event.target.closest("[data-edit-chapter-outline]");
     if (!button) return;
     editChapterOutlineFromDirectory(button.dataset.editChapterOutline);
+  });
+  $("#detail-outline-search").addEventListener("input", (event) => {
+    state.detailOutlineSearch = event.target.value || "";
+    renderDetailOutlineCenter();
+  });
+  $("#detail-outline-center-list").addEventListener("click", (event) => {
+    const button = event.target.closest("[data-detail-outline-chapter]");
+    if (!button) return;
+    selectDetailOutlineChapter(button.dataset.detailOutlineChapter);
+  });
+  $("#detail-outline-center-editor").addEventListener("input", () => markDetailOutlineDirty(true, "center"));
+  $("#save-detail-outline-center").addEventListener("click", () => saveDetailOutlineFromCenter());
+  $("#detail-outline-open-writer").addEventListener("click", () => {
+    selectChapter(state.activeChapterId);
+    switchPage("writer");
+    window.setTimeout(() => $("#chapter-detail-outline")?.scrollIntoView({ block: "start", behavior: "smooth" }), 0);
   });
   $("#outline-file").addEventListener("change", (event) => {
     importOutlineFromFile(event.target.files?.[0]);

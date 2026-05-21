@@ -26,6 +26,9 @@
           <button class="nav-item" data-page="outline">
             <i data-lucide="book-open-text"></i><span>大纲中心</span>
           </button>
+          <button class="nav-item" data-page="detail-outlines">
+            <i data-lucide="list-tree"></i><span>细纲中心</span>
+          </button>
           <button class="nav-item" data-page="characters">
             <i data-lucide="users-round"></i><span>角色进度</span>
           </button>
@@ -391,6 +394,52 @@
                 </button>
               </div>
               <div class="clue-list" id="clue-list"></div>
+            </section>
+          </div>
+        </section>
+
+        <section class="page" id="detail-outlines" aria-labelledby="detail-outlines-title">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">细纲中心</p>
+              <h1 id="detail-outlines-title">按当前项目编辑每一章细纲</h1>
+            </div>
+            <div class="inline-tools">
+              <span class="muted" id="detail-outline-project-summary">等待章节计划</span>
+              <button class="ghost-button" id="detail-outline-open-writer" type="button">
+                <i data-lucide="pen-line"></i><span>打开写作台</span>
+              </button>
+              <button class="primary-button small" id="save-detail-outline-center" type="button">
+                <i data-lucide="save"></i><span>保存细纲</span>
+              </button>
+            </div>
+          </div>
+
+          <div class="detail-center-layout">
+            <aside class="panel detail-center-list-panel">
+              <div class="panel-head tight">
+                <h2>章节细纲列表</h2>
+                <span class="muted" id="detail-outline-list-count">0 章</span>
+              </div>
+              <label class="detail-outline-search">
+                <i data-lucide="search"></i>
+                <input id="detail-outline-search" type="search" placeholder="搜索章号、章名、粗纲、细纲" />
+              </label>
+              <div class="detail-center-list" id="detail-outline-center-list"></div>
+            </aside>
+
+            <section class="panel detail-center-editor-panel">
+              <div class="panel-head tight">
+                <div>
+                  <h2 id="detail-outline-center-heading">等待章节计划</h2>
+                  <span class="muted" id="detail-outline-center-meta">导入大纲后自动生成章节细纲</span>
+                </div>
+              </div>
+              <div class="detail-center-rough">
+                <h3>本章粗纲</h3>
+                <p id="detail-outline-center-rough">暂无本章粗纲。</p>
+              </div>
+              <div class="detail-outline detail-outline-center-editor" id="detail-outline-center-editor"></div>
             </section>
           </div>
         </section>
