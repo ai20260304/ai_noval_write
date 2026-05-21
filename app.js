@@ -511,6 +511,200 @@ function refreshChapterStorySnapshot(project, chapter) {
   return snapshot;
 }
 
+function cloneForSnapshot(value) {
+  if (value === undefined) return null;
+  try {
+    return JSON.parse(JSON.stringify(value));
+  } catch {
+    return null;
+  }
+}
+
+function chapterVersionHash(chapter = {}) {
+  return styleSampleHash([
+    chapter.manuscript || "",
+    JSON.stringify(chapter.detailedOutline || {}),
+    chapter.score || "",
+    chapter.status || "",
+  ].join("\n"));
+}
+
+function createChapterVersionSnapshot(project, chapter, label = "自动快照", meta = {}) {
+  if (!project || !chapter) return null;
+  const hash = chapterVersionHash(chapter);
+  chapter.versions = Array.isArray(chapter.versions) ? chapter.versions : [];
+  const last = chapter.versions.at(-1);
+  if (last?.hash === hash && last?.label === label) return last;
+  const now = new Date().toISOString();
+  const snapshot = {
+    id: `chapter-${chapter.id}-${Date.now().toString(36)}-${hash.slice(0, 6)}`,
+    label,
+    createdAt: now,
+    hash,
+    manuscript: chapter.manuscript || "",
+    detailedOutline: cloneForSnapshot(chapter.detailedOutline),
+    score: chapter.score || null,
+    scoreDetail: cloneForSnapshot(chapter.scoreDetail),
+    scoreMeta: cloneForSnapshot(chapter.scoreMeta),
+    scoreNotes: cloneForSnapshot(chapter.scoreNotes || []),
+    reviewIssues: cloneForSnapshot(chapter.reviewIssues || []),
+    reviewPassed: Boolean(chapter.reviewPassed),
+    status: chapter.status || "待写",
+    wordCount: chapterWordCount(chapter.manuscript || ""),
+    progressState: cloneForSnapshot(chapter.progressState),
+    factRecords: cloneForSnapshot(chapter.factRecords || []),
+    meta,
+  };
+  chapter.versions = chapter.versions.concat(snapshot).slice(-12);
+  chapter.versionUpdatedAt = now;
+  project.chapterVersionCount = (project.chapters || []).reduce((sum, item) => sum + (item.versions || []).length, 0);
+  return snapshot;
+}
+
+function restoreChapterVersion(versionId) {
+  const project = currentProject();
+  const chapter = selectedChapter();
+  if (!chapter || !versionId) return;
+  const snapshot = (chapter.versions || []).find((item) => item.id === versionId);
+  if (!snapshot) {
+    showToast("没有找到这个章节快照。");
+    return;
+  }
+  createChapterVersionSnapshot(project, chapter, "回滚前快照", { reason: "restore", restoreFrom: versionId });
+  chapter.manuscript = snapshot.manuscript || "";
+  chapter.detailedOutline = cloneForSnapshot(snapshot.detailedOutline) || chapter.detailedOutline;
+  chapter.score = snapshot.score || null;
+  chapter.scoreDetail = cloneForSnapshot(snapshot.scoreDetail);
+  chapter.scoreMeta = cloneForSnapshot(snapshot.scoreMeta);
+  chapter.scoreNotes = cloneForSnapshot(snapshot.scoreNotes || []);
+  chapter.reviewIssues = cloneForSnapshot(snapshot.reviewIssues || []);
+  chapter.reviewPassed = Boolean(snapshot.reviewPassed);
+  chapter.status = snapshot.status || "待写";
+  chapter.wordCount = chapterWordCount(chapter.manuscript || "");
+  chapter.progressState = cloneForSnapshot(snapshot.progressState);
+  chapter.restoredAt = new Date().toISOString();
+  refreshChapterStorySnapshot(project, chapter);
+  refreshChapterFactCache(project, chapter);
+  refreshProjectStoryMemory(project, chapter);
+  project.words = projectWordCount(project);
+  state.activeChapterId = chapter.id;
+  $("#manuscript").value = chapter.manuscript;
+  renderAll();
+  switchPage("writer");
+  saveStateSoon("restore-chapter-version");
+  scheduleProductionSync("restore-chapter-version");
+  showToast(`已回滚到快照：${snapshot.label}`);
+}
+
+function saveCurrentChapterVersion() {
+  const project = currentProject();
+  const chapter = selectedChapter();
+  if (!chapter) return;
+  syncCurrentManuscript({ persist: false });
+  const snapshot = createChapterVersionSnapshot(project, chapter, "手动快照", { reason: "manual" });
+  renderChapterVersions(chapter);
+  saveStateSoon("manual-chapter-version");
+  scheduleProductionSync("manual-chapter-version");
+  showToast(snapshot ? `已保存章节快照：${snapshot.label}` : "当前内容已在最近快照中。");
+}
+
+function extractChapterFactRecords(project, chapter) {
+  if (!project || !chapter) return [];
+  const chapterId = Number(chapter.id || 0);
+  if (!chapterId) return [];
+  const now = new Date().toISOString();
+  const text = String(chapter.manuscript || "");
+  const detail = chapter.detailedOutline && !Array.isArray(chapter.detailedOutline) ? chapter.detailedOutline : {};
+  const add = (factType, subject, predicate, object, evidence, confidence = 0.8) => ({
+    projectId: project.id,
+    chapterId,
+    factType,
+    subject: String(subject || "").trim(),
+    predicate: String(predicate || "").trim(),
+    object: String(object || "").trim(),
+    evidence: compactMemoryText(evidence || object || "", 360),
+    confidence,
+    updatedAt: now,
+  });
+  const rows = [];
+  const summary = compactMemoryText([
+    chapter.title,
+    chapter.outline,
+    detail.core,
+    detail.opening,
+    chapter.memorySummary,
+    chapter.endingSnapshot,
+  ].filter(Boolean).join("；"), 520);
+  if (summary) rows.push(add("chapter_summary", `第${chapterId}章`, "发生", summary, text || summary, text ? 0.88 : 0.72));
+  if (chapter.endingSnapshot) rows.push(add("chapter_ending", `第${chapterId}章`, "结尾落点", chapter.endingSnapshot, chapter.endingSnapshot, 0.9));
+  for (const role of chapter.roles || []) {
+    const name = characterShortName(role);
+    if (!name) continue;
+    const index = text.indexOf(name);
+    rows.push(add(
+      "character_appearance",
+      name,
+      index >= 0 ? "实际出场" : "计划出场",
+      chapter.title || `第${chapterId}章`,
+      index >= 0 ? text.slice(Math.max(0, index - 120), index + 220) : chapter.outline || detail.core || chapter.title,
+      index >= 0 ? 0.9 : 0.64,
+    ));
+  }
+  if (text) {
+    knownIdentityFactsInText(project, chapter, text, chapterId).slice(0, 24).forEach((fact) => {
+      rows.push(add("identity_knowledge", fact.knower, "已知姓名/称呼", fact.target, fact.evidence, 0.84));
+    });
+  }
+  for (const clue of chapter.clues || []) {
+    if (!clue) continue;
+    rows.push(add("clue", "伏笔", text.includes(clue) ? "已落正文" : "计划埋设", clue, text.includes(clue) ? clue : chapter.outline || detail.hook || text, text.includes(clue) ? 0.88 : 0.66));
+  }
+  const progressState = updateChapterProgressState(project, chapter) || {};
+  [
+    ["trust", progressState.trust],
+    ["backlash", progressState.backlash],
+    ["prediction", progressState.prediction],
+    ...Object.entries(progressState.characterStats || {}),
+  ].forEach(([key, item]) => {
+    if (!item || item.value === undefined || item.value === null) return;
+    rows.push(add("numeric_state", `第${chapterId}章`, item.label || key, `${item.value}${item.unit || "%"}`, item.evidence || chapterProgressSummary(progressState), item.inherited ? 0.72 : 0.9));
+  });
+  if (chapter.llmMeta?.model) {
+    rows.push(add("generation_model", `第${chapterId}章`, "生成模型", `${chapter.llmMeta.provider || ""}/${chapter.llmMeta.model || ""}`, JSON.stringify(chapter.llmMeta).slice(0, 520), 0.95));
+  }
+  const seen = new Set();
+  return rows.filter((row) => {
+    const key = `${row.factType}:${row.chapterId}:${row.subject}:${row.predicate}:${row.object}`;
+    if (!row.subject || !row.predicate || !row.object || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function refreshChapterFactCache(project, chapter) {
+  if (!project || !chapter) return [];
+  const records = extractChapterFactRecords(project, chapter);
+  chapter.factRecords = records;
+  chapter.factUpdatedAt = new Date().toISOString();
+  project.chapterFacts = (project.chapterFacts || [])
+    .filter((fact) => Number(fact.chapterId || 0) !== Number(chapter.id || 0))
+    .concat(records)
+    .sort((a, b) => Number(a.chapterId || 0) - Number(b.chapterId || 0));
+  project.factUpdatedAt = chapter.factUpdatedAt;
+  return records;
+}
+
+function factMemoryLines(project, chapter, limit = 10) {
+  const currentId = Number(chapter?.id || 0);
+  return (project?.chapterFacts || [])
+    .filter((fact) => Number(fact.chapterId || 0) > 0 && Number(fact.chapterId || 0) < currentId)
+    .slice(-80)
+    .filter((fact) => /identity_knowledge|numeric_state|chapter_ending|clue|character_appearance/.test(fact.factType || ""))
+    .slice(-limit)
+    .map((fact) => `第${fact.chapterId}章 ${fact.subject}${fact.predicate}${fact.object}`)
+    .map((line) => compactMemoryText(line, 160));
+}
+
 function summarizeChapterMemory(chapter) {
   if (!chapter) return "";
   if (chapter.memorySummary) return compactMemoryText(chapter.memorySummary, 360);
@@ -718,6 +912,7 @@ function buildChapterContinuityMemory(project, chapter, lookback = 3) {
   const previousProgress = previous ? updateChapterProgressState(project, previous) : null;
   const currentProgress = updateChapterProgressState(project, chapter);
   const identityLines = identityContinuityLines(project, chapter);
+  const factLines = factMemoryLines(project, chapter);
   const progressLines = [
     previousProgress ? `上章数值：${chapterProgressSummary(previousProgress)}` : "",
     currentProgress ? `本章数值：${chapterProgressSummary(currentProgress)}` : "",
@@ -729,6 +924,7 @@ function buildChapterContinuityMemory(project, chapter, lookback = 3) {
     `本章必须接住：${currentNeed || compactMemoryText(chapter?.title || "", 160)}`,
     progressLines.length ? `数值状态：${progressLines.join(" ｜ ")}` : "",
     identityLines.length ? `身份状态：${identityLines.join(" ｜ ")}` : "",
+    factLines.length ? `事实库记忆：${factLines.join(" ｜ ")}` : "",
     recentLines.length ? `最近剧情：${recentLines.join(" ｜ ")}` : "",
     roleLines.length ? `角色状态：${roleLines.join(" ｜ ")}` : "",
     openThreads.length ? `未回收线索：${openThreads.join(" ｜ ")}` : "",
@@ -745,6 +941,7 @@ function buildChapterContinuityMemory(project, chapter, lookback = 3) {
     currentNeed,
     progressLines,
     identityLines,
+    factLines,
     recentLines,
     roleLines,
     openThreads,
@@ -806,6 +1003,72 @@ function factualContinuityRules(project, chapter) {
   return rules;
 }
 
+function buildContinuityGate(project, chapter) {
+  const issues = [];
+  if (!project || !chapter) return { passed: false, issues: [{ level: "高", text: "未选中章节。", fix: "先选择要生成的章节。" }], rules: [] };
+  const previous = previousChapterFor(project, chapter.id);
+  const continuity = buildChapterContinuityMemory(project, chapter);
+  const detailText = JSON.stringify(chapter.detailedOutline || "");
+  const outlineText = chapterOutlineMemoryText(chapter, 260);
+  if (previous && !String(previous.manuscript || "").trim() && !previous.memorySummary) {
+    issues.push({
+      level: "高",
+      text: `第 ${previous.id} 章没有正文或记忆快照，当前章缺少上章承接。`,
+      fix: "先生成/保存上一章，或在本章细纲第一场写清上章结果和人物位置。",
+    });
+  }
+  if (previous && !continuity.previousEnding) {
+    issues.push({
+      level: "高",
+      text: "连续性记忆缺少上一章尾声。",
+      fix: "保存上一章正文，让系统抽取结尾落点后再生成。",
+    });
+  }
+  if (previous && outlineText && continuity.previousEnding && !detailText.includes(continuity.previousEnding.slice(0, 12)) && !/承接|接住|上章|上一章|余波|电话|门外|结果|回到|赶到|抵达|继续/.test(detailText)) {
+    issues.push({
+      level: "中",
+      text: "本章细纲没有明显写出承接上一章结果。",
+      fix: "生成时第一场必须先处理上章尾声造成的余波、人物位置或未解决压力。",
+    });
+  }
+  const missingRoles = (chapter.roles || []).filter((role) => role && !detailText.includes(characterShortName(role)) && !String(chapter.outline || "").includes(characterShortName(role))).slice(0, 4);
+  if (missingRoles.length) {
+    issues.push({
+      level: "中",
+      text: `计划出场角色未进入细纲：${missingRoles.map(characterShortName).join("、")}。`,
+      fix: "生成时必须给这些角色补一个动作、一句台词或明确删出本章计划。",
+    });
+  }
+  if (continuity.identityLines?.length) {
+    issues.push({
+      level: "低",
+      text: `存在身份认知锁 ${continuity.identityLines.length} 条。`,
+      fix: "后续不能重复问名、重新认识或把已知关系写回初见状态。",
+    });
+  }
+  const hardIssues = issues.filter((issue) => issue.level === "高");
+  const rules = [
+    continuity.previousEnding ? `闸门锁定：第一场承接上一章尾声“${continuity.previousEnding}”。` : "",
+    continuity.previousBridge ? `闸门锁定：${continuity.previousBridge}` : "",
+    continuity.identityLines?.length ? `身份锁定：${continuity.identityLines.join("；")}` : "",
+    continuity.factLines?.length ? `事实锁定：${continuity.factLines.join("；")}` : "",
+    issues.length ? `闸门提醒：${issues.map((issue) => `${issue.level}-${issue.text} 修法：${issue.fix}`).join("；")}` : "",
+  ].filter(Boolean);
+  return {
+    passed: hardIssues.length === 0,
+    issues,
+    rules,
+    checkedAt: new Date().toISOString(),
+  };
+}
+
+function applyContinuityGate(project, chapter) {
+  const gate = buildContinuityGate(project, chapter);
+  chapter.continuityGate = gate;
+  chapter.continuityGateUpdatedAt = gate.checkedAt;
+  return gate;
+}
+
 function buildChapterGenerationContract(project, chapter) {
   const targetWords = activeTargetWords(project, chapter);
   const band = generationWordBand(targetWords);
@@ -813,6 +1076,7 @@ function buildChapterGenerationContract(project, chapter) {
   const continuity = buildChapterContinuityMemory(project, chapter);
   const factRules = factualContinuityRules(project, chapter);
   const numericRules = buildNumericContinuityRules(project, chapter);
+  const gate = buildContinuityGate(project, chapter);
   return [
     `正文目标 ${band.target} 字，合格区间 ${band.min}-${band.max} 字。`,
     "只输出小说正文，不输出粗纲、细纲、写法说明、规则复述或分析文字。",
@@ -824,6 +1088,7 @@ function buildChapterGenerationContract(project, chapter) {
     continuity.previousEnding ? `开篇落点：第一场必须处理“${continuity.previousEnding}”留下的结果、人物位置或未解决压力。` : "",
     "前 300 字必须先接住上一章结果、余波或人物状态，再写本章新推进。",
     "禁止把每章写成独立短篇；不要跳过上一章结尾直接开新事件。",
+    ...gate.rules,
     ...numericRules,
     ...factRules,
     "每段都落在人物动作、对话、心理选择、关系变化或结果变化上，少解释，少静态陈设。",
@@ -1816,6 +2081,27 @@ function resetGenerationProgress() {
     box.hidden = true;
     box.classList.remove("running", "failed");
   }
+}
+
+let productionSyncTimer = null;
+
+function scheduleProductionSync(reason = "auto") {
+  if (!canUseLocalService()) return;
+  window.clearTimeout(productionSyncTimer);
+  productionSyncTimer = window.setTimeout(async () => {
+    try {
+      await saveState(`before-production-auto-sync-${reason}`);
+      const project = currentProject();
+      const payload = await productionApi("/api/production/sync", {
+        method: "POST",
+        body: JSON.stringify({ projectId: project.id }),
+      });
+      productionCache.summary = payload.summary;
+      renderProduction();
+    } catch (error) {
+      console.warn("production auto sync failed", error);
+    }
+  }, 900);
 }
 
 function refreshIcons() {
@@ -3215,10 +3501,13 @@ async function saveCurrentDetailOutline() {
     chapter.generationContract = buildChapterGenerationContract(project, chapter);
   }
   chapter.detailOutlineEditedAt = new Date().toISOString();
+  applyContinuityGate(project, chapter);
   const continuity = refreshProjectStoryMemory(project, chapter);
-  $("#chapter-continuity").innerHTML = renderContinuityMemory(continuity);
+  $("#chapter-continuity").innerHTML = renderContinuityMemory(continuity) + renderContinuityGate(chapter);
   markDetailOutlineDirty(false);
   renderChapters(chapter.id);
+  createChapterVersionSnapshot(project, chapter, "细纲保存快照", { reason: "detail-outline" });
+  scheduleProductionSync("save-detail-outline");
   await saveStateNowWithMessage("save-detail-outline", `第 ${chapter.id} 章细纲已保存。`);
 }
 
@@ -3650,6 +3939,7 @@ function renderContinuityMemory(memory) {
     memory.previousBridge ? ["接力要求", memory.previousBridge] : null,
     memory.currentNeed ? ["本章承接", memory.currentNeed] : null,
     memory.progressLines?.length ? ["数值状态", memory.progressLines.join(" ｜ ")] : null,
+    memory.factLines?.length ? ["事实库", memory.factLines.join(" ｜ ")] : null,
     memory.roleLines?.length ? ["角色状态", memory.roleLines.join(" ｜ ")] : null,
     memory.openThreads?.length ? ["未收线索", memory.openThreads.join(" ｜ ")] : null,
   ].filter(Boolean);
@@ -3662,6 +3952,34 @@ function renderContinuityMemory(memory) {
       </div>
     `)
     .join("");
+}
+
+function renderContinuityGate(chapter) {
+  const gate = chapter?.continuityGate;
+  if (!gate?.issues?.length) return "";
+  return `
+    <div class="continuity-line">
+      <strong>生成闸门</strong>
+      <span>${escapeHtml(compactMemoryText(gate.issues.map((issue) => `${issue.level}:${issue.text}`).join("；"), 220))}</span>
+    </div>
+  `;
+}
+
+function renderChapterVersions(chapter = selectedChapter()) {
+  const node = $("#chapter-version-list");
+  if (!node) return;
+  const versions = (chapter?.versions || []).slice(-5).reverse();
+  node.innerHTML = versions.length
+    ? versions.map((version) => `
+      <div class="chapter-version-item">
+        <div>
+          <strong>${escapeHtml(version.label || "快照")}</strong>
+          <span>${escapeHtml(new Date(version.createdAt || Date.now()).toLocaleString("zh-CN", { hour12: false }))} · ${version.wordCount || 0} 字 · ${version.score || "未评"} 分</span>
+        </div>
+        <button class="mini-button" type="button" data-restore-version="${escapeHtml(version.id)}">回滚</button>
+      </div>
+    `).join("")
+    : `<p class="muted">保存、生成或修稿后会自动留下最近快照。</p>`;
 }
 
 function selectedChapter() {
@@ -3697,8 +4015,9 @@ function selectChapter(id) {
     $("#editor-meta").textContent = "导入大纲并拆章后开始写作。";
     $("#manuscript").value = "";
     $("#chapter-outline").textContent = "暂无本章大纲。";
-    $("#chapter-continuity").innerHTML = "";
-    $("#chapter-detail-outline").innerHTML = "";
+  $("#chapter-continuity").innerHTML = "";
+  $("#chapter-detail-outline").innerHTML = "";
+    $("#chapter-version-list").innerHTML = "";
     $("#required-roles").innerHTML = "";
     $("#chapter-clues").innerHTML = "";
     $("#chapter-style-rules").innerHTML = "";
@@ -3717,7 +4036,7 @@ function selectChapter(id) {
   $("#editor-meta").innerHTML = editorMetaHtml(project, chapter);
   $("#manuscript").value = chapter.manuscript;
   $("#chapter-outline").textContent = chapter.outline;
-  $("#chapter-continuity").innerHTML = renderContinuityMemory(continuity);
+  $("#chapter-continuity").innerHTML = renderContinuityMemory(continuity) + renderContinuityGate(chapter);
   $("#chapter-detail-outline").innerHTML = renderDetailedOutline(chapter.detailedOutline);
   markDetailOutlineDirty(false);
   $("#required-roles").innerHTML = chapter.roles.map((role) => `<span class="tag">${role}</span>`).join("");
@@ -3730,6 +4049,7 @@ function selectChapter(id) {
     .join("");
   $("#chapter-gold-finger").innerHTML = renderGoldFingerList(project);
   $("#chapter-llm-status").textContent = llmUsageText(chapter.llmMeta || (chapter.llmError ? { error: chapter.llmError } : {}), chapter);
+  renderChapterVersions(chapter);
   renderChapterScore(chapter);
   updateWorkflowButtons(chapter);
 }
@@ -4560,7 +4880,15 @@ async function runProductionEditorAgent() {
 }
 
 function renderAll() {
-  state.projects.forEach(ensureProjectPlanning);
+  state.projects.forEach((project) => {
+    ensureProjectPlanning(project);
+    sortChaptersById(project.chapters || []).forEach((chapter) => {
+      if (chapter.manuscript || chapter.detailedOutline) {
+        refreshChapterStorySnapshot(project, chapter);
+        refreshChapterFactCache(project, chapter);
+      }
+    });
+  });
   renderProjectSelect();
   renderProjectList();
   renderDashboard();
@@ -5334,29 +5662,17 @@ function scoreCurrentChapter() {
   $("#manuscript").value = normalizedText;
   chapter.manuscript = normalizedText;
   chapter.wordCount = chapterWordCount(chapter.manuscript);
-  updateChapterProgressState(project, chapter);
-  const targetWords = activeTargetWords(project, chapter);
   const audit = auditChapterDraft(project, chapter);
-  chapter.scoreDetail = audit.detail;
-  chapter.score = audit.score;
-  chapter.scoreMeta = audit.meta;
-  chapter.reviewIssues = audit.issues;
-  chapter.reviewPassed = audit.passed;
-  chapter.reviewedAt = new Date().toISOString();
-  if (chapter.status !== "完成") {
-    chapter.status = audit.passed ? "已审查" : "待修";
-  }
-  chapter.wordCount = chapterWordCount(chapter.manuscript);
-  chapter.progress = Math.min(99, Math.round((chapter.wordCount / targetWords) * 100));
-  if (chapter.status === "完成") chapter.progress = 100;
-  chapter.scoreNotes = audit.notes;
-  const scores = project.chapters.filter((item) => item.score).map((item) => item.score);
-  project.averageScore = Math.round(scores.reduce((sum, value) => sum + value, 0) / scores.length);
+  applyAuditResult(project, chapter, audit);
+  refreshChapterStorySnapshot(project, chapter);
+  refreshChapterFactCache(project, chapter);
+  createChapterVersionSnapshot(project, chapter, "审查快照", { reason: "score", score: audit.score });
   project.health.audit = Math.min(project.health.audit + 10, 100);
   state.activeChapterFilter = chapter.status === "完成" ? "done" : "review";
   renderAll();
   switchPage("writer");
   saveStateSoon("score-chapter");
+  scheduleProductionSync("score-chapter");
   if (chapter.status === "完成") {
     showToast(`第 ${chapter.id} 章已重新审查打分：${chapter.score} 分，完成状态保持不变。`);
   } else {
@@ -5369,6 +5685,59 @@ function updateProjectScoreSummary(project) {
   if (scores.length) {
     project.averageScore = Math.round(scores.reduce((sum, value) => sum + value, 0) / scores.length);
   }
+}
+
+function applyAuditResult(project, chapter, audit, { preserveDone = true } = {}) {
+  const targetWords = activeTargetWords(project, chapter);
+  chapter.scoreDetail = audit.detail;
+  chapter.score = audit.score;
+  chapter.scoreMeta = audit.meta;
+  chapter.reviewIssues = audit.issues;
+  chapter.reviewPassed = audit.passed;
+  chapter.scoreNotes = audit.notes;
+  chapter.reviewedAt = new Date().toISOString();
+  if (!preserveDone || chapter.status !== "完成") {
+    chapter.status = audit.passed ? "已审查" : "待修";
+  }
+  chapter.wordCount = chapterWordCount(chapter.manuscript || "");
+  chapter.progress = chapter.status === "完成" ? 100 : Math.min(99, Math.round((chapter.wordCount / targetWords) * 100));
+  updateChapterProgressState(project, chapter);
+  updateProjectScoreSummary(project);
+  return audit;
+}
+
+function needsPostGenerationPolish(audit) {
+  if (!audit?.issues?.length) return false;
+  const hardTypes = new Set(["字数", "禁词", "AI味", "连续性", "数值合法性", "事实", "污染"]);
+  return audit.issues.some((issue) => issue.level === "高" || hardTypes.has(issue.type));
+}
+
+async function runPostGenerationPolish(project, chapter, auditBefore, route, targetWords) {
+  if (!needsPostGenerationPolish(auditBefore)) return null;
+  const taskName = "去 AI 味改写";
+  setGenerationProgress(94, "二段校准", `初稿审查发现 ${auditBefore.issues.length} 项问题，正在自动修稿。`);
+  chapter.autoFixPrompt = buildChapterFixPrompt(project, chapter, auditBefore.issues);
+  const result = await callChapterModel(project, chapter, chapter.autoFixPrompt, targetWords, taskName);
+  const revised = trimDraftToWordLimit(cleanGeneratedDraft(result.text), 3000);
+  if (!revised.trim()) throw new Error("二段修稿返回正文为空");
+  recordLlmUsage(project, chapter, result);
+  chapter.manuscript = revised;
+  chapter.autoFixAppliedAt = new Date().toISOString();
+  chapter.autoFixIssueCount = auditBefore.issues.length;
+  chapter.autoFixHistory = (chapter.autoFixHistory || []).concat({
+    at: chapter.autoFixAppliedAt,
+    task: result.task || taskName,
+    issueCount: auditBefore.issues.length,
+    scoreBefore: auditBefore.score,
+    wordCountBefore: auditBefore.meta.wordCount,
+    route: `${result.provider || route?.provider || ""} / ${result.model || route?.model || ""}`.trim(),
+    mode: "post-generation",
+  }).slice(-10);
+  chapter.wordCount = chapterWordCount(chapter.manuscript);
+  updateChapterProgressState(project, chapter);
+  refreshChapterStorySnapshot(project, chapter);
+  refreshChapterFactCache(project, chapter);
+  return result;
 }
 
 async function autoFixCurrentChapter() {
@@ -5398,6 +5767,7 @@ async function autoFixCurrentChapter() {
   if (previousText !== currentText) {
     recordManualStyleRevision(project, chapter, previousText, currentText);
   }
+  createChapterVersionSnapshot(project, chapter, "修稿前快照", { reason: "before-auto-fix" });
   chapter.manuscript = currentText;
   chapter.wordCount = chapterWordCount(chapter.manuscript);
   updateChapterProgressState(project, chapter);
@@ -5465,24 +5835,19 @@ async function autoFixCurrentChapter() {
     chapter.wordCount = chapterWordCount(chapter.manuscript);
     updateChapterProgressState(project, chapter);
     refreshChapterStorySnapshot(project, chapter);
+    refreshChapterFactCache(project, chapter);
     const nextChapter = nextChapterFor(project, chapter.id);
     if (nextChapter) refreshProjectStoryMemory(project, nextChapter);
     refreshProjectStoryMemory(project, chapter);
 
     const auditAfter = auditChapterDraft(project, chapter);
-    chapter.scoreDetail = auditAfter.detail;
-    chapter.score = auditAfter.score;
-    chapter.scoreMeta = auditAfter.meta;
-    chapter.reviewIssues = auditAfter.issues;
-    chapter.reviewPassed = auditAfter.passed;
-    chapter.scoreNotes = auditAfter.notes;
-    chapter.reviewedAt = new Date().toISOString();
+    applyAuditResult(project, chapter, auditAfter, { preserveDone: true });
     chapter.autoFixHistory[chapter.autoFixHistory.length - 1].scoreAfter = auditAfter.score;
     chapter.autoFixHistory[chapter.autoFixHistory.length - 1].wordCountAfter = auditAfter.meta.wordCount;
     chapter.status = previousStatus === "完成" && auditAfter.passed ? "完成" : (auditAfter.passed ? "已审查" : "待修");
     chapter.progress = chapter.status === "完成" ? 100 : Math.min(99, Math.round((chapter.wordCount / targetWords) * 100));
     project.words = projectWordCount(project);
-    updateProjectScoreSummary(project);
+    createChapterVersionSnapshot(project, chapter, "模型修稿快照", { reason: "auto-fix", score: auditAfter.score });
     project.health.audit = Math.min((project.health.audit || 0) + 10, 100);
     state.activeChapterFilter = chapter.status === "完成" ? "done" : "review";
     state.activeChapterId = chapter.id;
@@ -5492,6 +5857,7 @@ async function autoFixCurrentChapter() {
     switchPage("writer");
     selectChapter(chapter.id);
     saveStateSoon("auto-fix-chapter");
+    scheduleProductionSync("auto-fix-chapter");
     finishGenerationProgress(`修稿完成：${chapterWordCount(chapter.manuscript)}/${targetWords} 字，评分 ${chapter.score} 分，剩余 ${chapter.reviewIssues.length} 项问题。`);
     showToast(auditAfter.issues.length
       ? `第 ${chapter.id} 章已修稿并重评：${chapter.score} 分，仍有 ${auditAfter.issues.length} 项需修。`
@@ -5542,25 +5908,21 @@ async function completeCurrentChapter() {
   }
   $("#manuscript").value = nextText;
   recordManualStyleRevision(project, chapter, previousText, nextText);
+  createChapterVersionSnapshot(project, chapter, "完成前快照", { reason: "before-complete" });
   chapter.manuscript = nextText;
   chapter.wordCount = chapterWordCount(chapter.manuscript);
   updateChapterProgressState(project, chapter);
   const audit = auditChapterDraft(project, chapter);
-  chapter.scoreDetail = audit.detail;
-  chapter.score = audit.score;
-  chapter.scoreMeta = audit.meta;
-  chapter.reviewIssues = audit.issues;
-  chapter.reviewPassed = audit.passed;
-  chapter.scoreNotes = audit.notes;
-  chapter.reviewedAt = new Date().toISOString();
+  applyAuditResult(project, chapter, audit, { preserveDone: false });
   chapter.completionWarnings = audit.issues;
   chapter.status = "完成";
   chapter.progress = 100;
   chapter.completedAt = new Date().toISOString();
   project.currentChapter = Math.max(project.currentChapter || 0, chapter.id);
   project.words = projectWordCount(project);
-  const scores = project.chapters.filter((item) => item.score).map((item) => item.score);
-  if (scores.length) project.averageScore = Math.round(scores.reduce((sum, value) => sum + value, 0) / scores.length);
+  refreshChapterStorySnapshot(project, chapter);
+  refreshChapterFactCache(project, chapter);
+  createChapterVersionSnapshot(project, chapter, "完成快照", { reason: "complete", score: audit.score });
   project.health.audit = Math.min((project.health.audit || 0) + 10, 100);
   state.activeChapterFilter = "done";
   state.activeChapterId = chapter.id;
@@ -5572,6 +5934,7 @@ async function completeCurrentChapter() {
       ? `第 ${chapter.id} 章已标记完成，保留 ${audit.issues.length} 项审查提示。`
       : `第 ${chapter.id} 章已标记完成。`,
   );
+  scheduleProductionSync("complete-chapter");
 }
 
 function normalizeDraftOutline(project, chapter) {
@@ -6015,7 +6378,14 @@ async function generateCopy() {
   }
   const detail = normalizeDraftOutline(project, chapter);
   const continuity = refreshProjectStoryMemory(project, chapter);
-  $("#chapter-continuity").innerHTML = renderContinuityMemory(continuity);
+  const gate = applyContinuityGate(project, chapter);
+  if (!gate.passed) {
+    showToast(`连续性闸门未通过：${gate.issues.find((issue) => issue.level === "高")?.text || gate.issues[0]?.text}`);
+    selectChapter(chapter.id);
+    saveStateSoon("continuity-gate-blocked");
+    return;
+  }
+  $("#chapter-continuity").innerHTML = renderContinuityMemory(continuity) + renderContinuityGate(chapter);
   chapter.generationPrompt = buildChapterGenerationPrompt(project, chapter, detail);
   chapter.generationContract = buildChapterGenerationContract(project, chapter);
   const route = routeForTask("章节正文");
@@ -6026,6 +6396,7 @@ async function generateCopy() {
   const previousButtonText = generateLabel?.textContent || "按约束生成";
   if (generateLabel) generateLabel.textContent = "生成中";
   const previousManuscript = chapter.manuscript || "";
+  createChapterVersionSnapshot(project, chapter, "生成前快照", { reason: "before-generate" });
   startGenerationProgress(route, chapter, targetWords);
   showToast(route ? `正在调用 ${route.provider} / ${route.model} 生成正文...` : "正在调用模型生成正文...");
 
@@ -6045,14 +6416,30 @@ async function generateCopy() {
     chapter.progress = Math.min(99, Math.round((chapter.wordCount / targetWords) * 100));
     updateChapterProgressState(project, chapter);
     refreshChapterStorySnapshot(project, chapter);
+    refreshChapterFactCache(project, chapter);
+    const auditBeforePolish = auditChapterDraft(project, chapter);
+    applyAuditResult(project, chapter, auditBeforePolish, { preserveDone: true });
+    const polishResult = await runPostGenerationPolish(project, chapter, auditBeforePolish, route, targetWords);
+    if (polishResult) {
+      const auditAfterPolish = auditChapterDraft(project, chapter);
+      applyAuditResult(project, chapter, auditAfterPolish, { preserveDone: true });
+      refreshChapterStorySnapshot(project, chapter);
+      refreshChapterFactCache(project, chapter);
+      if (chapter.autoFixHistory?.length) {
+        chapter.autoFixHistory[chapter.autoFixHistory.length - 1].scoreAfter = auditAfterPolish.score;
+        chapter.autoFixHistory[chapter.autoFixHistory.length - 1].wordCountAfter = auditAfterPolish.meta.wordCount;
+      }
+    }
+    createChapterVersionSnapshot(project, chapter, polishResult ? "生成后二段校准快照" : "生成快照", { reason: "generate", score: chapter.score || null, polished: Boolean(polishResult) });
     const nextChapter = nextChapterFor(project, chapter.id);
     if (nextChapter) refreshProjectStoryMemory(project, nextChapter);
     refreshProjectStoryMemory(project, chapter);
     $("#manuscript").value = chapter.manuscript;
     selectChapter(chapter.id);
     saveStateSoon("generate-copy");
-    finishGenerationProgress(`已生成 ${chapterWordCount(chapter.manuscript)}/${targetWords} 字，${llmUsageText(chapter.llmMeta, chapter)}`);
-    showToast(`模型生成完成：${llmUsageText(chapter.llmMeta, chapter)}`);
+    scheduleProductionSync("generate-copy");
+    finishGenerationProgress(`已生成 ${chapterWordCount(chapter.manuscript)}/${targetWords} 字，评分 ${chapter.score || "--"} 分，${llmUsageText(chapter.llmMeta, chapter)}`);
+    showToast(`模型生成完成${polishResult ? "，已自动二段校准" : ""}：${llmUsageText(chapter.llmMeta, chapter)}`);
   } catch (error) {
     chapter.llmError = error.message || "模型调用失败";
     chapter.llmMeta = {
@@ -6122,20 +6509,30 @@ function syncCurrentManuscript({ persist = true, toast = false } = {}) {
   const nextText = $("#manuscript").value;
   const normalizedText = trimDraftToWordLimit(nextText, 3000);
   recordManualStyleRevision(project, chapter, previousText, normalizedText);
+  if (toast && previousText !== normalizedText) {
+    createChapterVersionSnapshot(project, chapter, "手动保存前快照", { reason: "before-manual-save" });
+  }
+  applyContinuityGate(project, chapter);
   chapter.manuscript = normalizedText;
   chapter.wordCount = chapterWordCount(chapter.manuscript);
   chapter.progress = Math.min(99, Math.round((chapter.wordCount / targetWords) * 100));
   updateChapterProgressState(project, chapter);
   project.words = projectWordCount(project);
   refreshChapterStorySnapshot(project, chapter);
+  refreshChapterFactCache(project, chapter);
   const nextChapter = nextChapterFor(project, chapter.id);
   if (nextChapter) refreshProjectStoryMemory(project, nextChapter);
   const continuity = refreshProjectStoryMemory(project, chapter);
   renderChapters(chapter.id);
   $("#editor-meta").innerHTML = editorMetaHtml(project, chapter);
-  $("#chapter-continuity").innerHTML = renderContinuityMemory(continuity);
+  $("#chapter-continuity").innerHTML = renderContinuityMemory(continuity) + renderContinuityGate(chapter);
+  renderChapterVersions(chapter);
   if (persist) saveStateSoon("manuscript-edit");
-  if (toast) showToast(`第 ${chapter.id} 章已保存：${chapterWordCount(chapter.manuscript)}/${targetWords} 字。`);
+  if (toast) {
+    createChapterVersionSnapshot(project, chapter, "手动保存快照", { reason: "manual-save" });
+    scheduleProductionSync("manual-save");
+    showToast(`第 ${chapter.id} 章已保存：${chapterWordCount(chapter.manuscript)}/${targetWords} 字。`);
+  }
 }
 
 function saveCurrentManuscript() {
@@ -6283,6 +6680,12 @@ function bindEvents() {
   $("#manuscript").addEventListener("input", () => syncCurrentManuscript());
   $("#chapter-detail-outline").addEventListener("input", () => markDetailOutlineDirty(true));
   $("#save-detail-outline").addEventListener("click", () => saveCurrentDetailOutline());
+  $("#save-chapter-version").addEventListener("click", () => saveCurrentChapterVersion());
+  $("#chapter-version-list").addEventListener("click", (event) => {
+    const button = event.target.closest("[data-restore-version]");
+    if (!button) return;
+    restoreChapterVersion(button.dataset.restoreVersion);
+  });
   $("#style-sample").addEventListener("input", () => syncStyleSampleFromDom());
   $("#style-file").addEventListener("change", (event) => {
     importStyleSamples(event.target.files || []);
