@@ -1964,6 +1964,10 @@ const selectionRewriteState = {
   end: 0,
   text: "",
   result: "",
+  running: false,
+  progressTimer: null,
+  progressStartedAt: 0,
+  progressValue: 0,
 };
 
 function selectedManuscriptRange() {
@@ -1985,6 +1989,7 @@ function updateSelectionRewritePanel({ force = false } = {}) {
     if (!force && document.activeElement === $("#selection-rewrite-instruction")) return;
     panel.hidden = true;
     $("#apply-selection-rewrite").disabled = true;
+    resetSelectionRewriteProgress();
     return;
   }
   selectionRewriteState.start = range.start;
@@ -1996,6 +2001,62 @@ function updateSelectionRewritePanel({ force = false } = {}) {
   $("#selection-rewrite-source").textContent = compactMemoryText(range.text, 360);
   $("#selection-rewrite-result").value = "";
   $("#apply-selection-rewrite").disabled = true;
+  resetSelectionRewriteProgress();
+}
+
+function setSelectionRewriteProgress(percent, title, detail, { running = true, failed = false } = {}) {
+  const box = $("#selection-rewrite-progress");
+  if (!box) return;
+  selectionRewriteState.progressValue = Math.max(0, Math.min(100, Math.round(percent)));
+  box.hidden = false;
+  box.classList.toggle("running", running && !failed);
+  box.classList.toggle("failed", failed);
+  $("#selection-rewrite-progress-title").textContent = title;
+  $("#selection-rewrite-progress-percent").textContent = `${selectionRewriteState.progressValue}%`;
+  $("#selection-rewrite-progress-bar").style.width = `${selectionRewriteState.progressValue}%`;
+  $("#selection-rewrite-progress-detail").textContent = detail;
+  if (selectionRewriteState.progressStartedAt) {
+    $("#selection-rewrite-progress-elapsed").textContent = formatElapsed(Date.now() - selectionRewriteState.progressStartedAt);
+  }
+}
+
+function startSelectionRewriteProgress(route, chapter, range) {
+  window.clearInterval(selectionRewriteState.progressTimer);
+  selectionRewriteState.progressStartedAt = Date.now();
+  selectionRewriteState.progressValue = 6;
+  const modelText = route ? `${route.provider} / ${route.model}` : "按片段改写路由选择模型";
+  const wordCount = chapterWordCount(range?.text || "");
+  setSelectionRewriteProgress(6, "准备片段改写", `第 ${chapter.id} 章，选区 ${wordCount} 字，模型 ${modelText}`);
+  selectionRewriteState.progressTimer = window.setInterval(() => {
+    const elapsed = Date.now() - selectionRewriteState.progressStartedAt;
+    const ceiling = elapsed > 45000 ? 90 : elapsed > 20000 ? 84 : 76;
+    const next = Math.min(ceiling, selectionRewriteState.progressValue + (elapsed > 30000 ? 1 : 3));
+    setSelectionRewriteProgress(next, "等待模型返回", `片段改写模型正在生成，已等待 ${formatElapsed(elapsed)}。`);
+  }, 2500);
+}
+
+function finishSelectionRewriteProgress(message = "模型已返回，结果已写入改写框") {
+  window.clearInterval(selectionRewriteState.progressTimer);
+  selectionRewriteState.progressTimer = null;
+  setSelectionRewriteProgress(100, "片段改写完成", message, { running: false });
+}
+
+function failSelectionRewriteProgress(message = "片段改写失败") {
+  window.clearInterval(selectionRewriteState.progressTimer);
+  selectionRewriteState.progressTimer = null;
+  setSelectionRewriteProgress(Math.max(selectionRewriteState.progressValue, 100), "片段改写失败", message, { running: false, failed: true });
+}
+
+function resetSelectionRewriteProgress() {
+  window.clearInterval(selectionRewriteState.progressTimer);
+  selectionRewriteState.progressTimer = null;
+  selectionRewriteState.progressStartedAt = 0;
+  selectionRewriteState.progressValue = 0;
+  const box = $("#selection-rewrite-progress");
+  if (box) {
+    box.hidden = true;
+    box.classList.remove("running", "failed");
+  }
 }
 
 function buildSelectionRewritePrompt(project, chapter, selection, instruction) {
@@ -4447,14 +4508,24 @@ async function rewriteSelectedManuscript() {
   const button = $("#rewrite-selection");
   const label = $("#rewrite-selection span");
   const previousLabel = label?.textContent || "改写选区";
+  const route = routeForTask("片段改写");
+  selectionRewriteState.running = true;
   if (button) button.disabled = true;
   if (label) label.textContent = "改写中";
   try {
     selectionRewriteState.start = range.start;
     selectionRewriteState.end = range.end;
     selectionRewriteState.text = range.text;
+    selectionRewriteState.result = "";
+    selectionRewriteState.modelResult = null;
+    $("#selection-rewrite-result").value = "";
+    $("#apply-selection-rewrite").disabled = true;
+    startSelectionRewriteProgress(route, chapter, range);
+    setSelectionRewriteProgress(22, "整理改写上下文", "正在读取选区前后文、文风规则、禁用词和历史改写记忆。");
     const prompt = buildSelectionRewritePrompt(project, chapter, range, instruction);
+    setSelectionRewriteProgress(38, "发送模型请求", route ? `已向 ${route.provider} / ${route.model} 发送片段改写请求。` : "已向片段改写模型发送请求。");
     const result = await callChapterModel(project, chapter, prompt, Math.max(128, chapterWordCount(range.text) + 80), "片段改写");
+    setSelectionRewriteProgress(88, "模型已返回", "正在清理结果、记录 token 和模型调用信息。");
     const rewritten = cleanSelectionRewrite(result.text);
     if (!rewritten) throw new Error("模型返回片段为空");
     selectionRewriteState.result = rewritten;
@@ -4462,10 +4533,18 @@ async function rewriteSelectedManuscript() {
     $("#selection-rewrite-result").value = rewritten;
     $("#apply-selection-rewrite").disabled = false;
     recordAuxiliaryLlmUsage(project, chapter, { ...result, task: "片段改写" }, "selectionRewriteLlmMeta", "selectionRewriteLogs");
+    finishSelectionRewriteProgress(`已调用 ${result.provider || route?.provider || "模型"} / ${result.model || route?.model || "-"}，返回 ${chapterWordCount(rewritten)} 字，可检查后应用。`);
+    $("#editor-meta").innerHTML = editorMetaHtml(project, chapter);
+    saveStateSoon("selection-rewrite-generated");
     showToast("片段改写完成，可检查后应用。");
   } catch (error) {
-    showToast(`片段改写失败：${error.message || "模型调用失败"}`);
+    const message = error.message || "模型调用失败";
+    failSelectionRewriteProgress(message);
+    $("#selection-rewrite-result").value = `改写失败：${message}`;
+    $("#apply-selection-rewrite").disabled = true;
+    showToast(`片段改写失败：${message}`);
   } finally {
+    selectionRewriteState.running = false;
     if (button) button.disabled = false;
     if (label) label.textContent = previousLabel;
   }
