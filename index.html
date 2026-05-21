@@ -505,6 +505,25 @@
                   <span id="generation-progress-elapsed">0 秒</span>
                 </div>
               </div>
+              <div class="selection-rewrite-panel" id="selection-rewrite-panel" hidden>
+                <div class="selection-rewrite-head">
+                  <strong>片段改写</strong>
+                  <span id="selection-rewrite-range">未选择</span>
+                </div>
+                <div class="selection-rewrite-body">
+                  <p id="selection-rewrite-source"></p>
+                  <textarea id="selection-rewrite-instruction" rows="2" placeholder="改写要求：更口语、心理活动更丰富、去掉场景物品堆砌、对白更锋利..."></textarea>
+                  <textarea id="selection-rewrite-result" rows="3" placeholder="模型返回的改写文本"></textarea>
+                </div>
+                <div class="selection-rewrite-actions">
+                  <button class="ghost-button" id="rewrite-selection" type="button">
+                    <i data-lucide="wand-sparkles"></i><span>改写选区</span>
+                  </button>
+                  <button class="primary-button" id="apply-selection-rewrite" type="button" disabled>
+                    <i data-lucide="check"></i><span>应用改写</span>
+                  </button>
+                </div>
+              </div>
               <textarea class="manuscript" id="manuscript" aria-label="正文编辑器"></textarea>
             </section>
 

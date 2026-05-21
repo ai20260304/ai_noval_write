@@ -177,6 +177,7 @@ const state = {
     { task: "文风学习", provider: "Claude / Anthropic", model: "claude-sonnet-4.5", temperature: "0.2", usage: "样章分析和规则归纳" },
     { task: "完稿评分", provider: "GPT / OpenAI", model: "gpt-5.2", temperature: "0.1", usage: "剧情、文风、爽点评分" },
     { task: "章节标题", provider: "DeepSeek", model: "deepseek-chat", temperature: "0.35", usage: "根据正文生成短章名" },
+    { task: "片段改写", provider: "DeepSeek", model: "deepseek-chat", temperature: "0.45", usage: "按选区和要求精确改写正文片段" },
     { task: "一致性审查", provider: "自定义供应商", model: "gpt-5.5", temperature: "0.1", usage: "长上下文事实校验" },
     { task: "公开资料补强", provider: "自定义供应商", model: "gpt-5.5", temperature: "0.2", usage: "联网资料摘要与故事路线补强" },
     { task: "尺度红线审查", provider: "Claude / Anthropic", model: "claude-sonnet-4.5", temperature: "0", usage: "暧昧、亲密、未成年和平台风险审查" },
@@ -1108,6 +1109,12 @@ function combinedGenerationRules(project) {
         ...(project.styleRevisionSamples || []).slice(-3).map((sample) => `人工修订样本｜第${sample.chapter}章：${sample.after}`),
       ]
     : [];
+  const selectionRules = (project?.selectionRewriteMemories || []).length
+    ? [
+        "优先避开作者已明确修过的句子问题：同类表达下次不要再出现。",
+        ...(project.selectionRewriteMemories || []).slice(-8).map((memory) => `选区改写记忆｜问题：${memory.instruction || "按作者要求"}｜原句：${compactMemoryText(memory.before, 80)}｜改法：${compactMemoryText(memory.after, 120)}`),
+      ]
+    : [];
   const rules = [
     ...wordRules,
     ...numericLegalityRules(),
@@ -1116,6 +1123,7 @@ function combinedGenerationRules(project) {
     ...tagRules,
     ...learned.filter((rule) => !wordRules.includes(rule)),
     ...revisionRules,
+    ...selectionRules,
   ];
   const seen = new Set();
   return rules.filter((rule) => {
@@ -1903,16 +1911,20 @@ function routeForTask(taskName = "章节正文") {
 
 function ensureDefaultRoutes() {
   state.routes = Array.isArray(state.routes) ? state.routes : [];
-  if (!state.routes.some((route) => route.task === "章节标题")) {
-    const draftRoute = routeForTask("章节正文") || state.routes[0] || { provider: "DeepSeek", model: "deepseek-chat", temperature: "0.5" };
+  const draftRoute = routeForTask("章节正文") || state.routes[0] || { provider: "DeepSeek", model: "deepseek-chat", temperature: "0.5" };
+  [
+    ["章节标题", "0.35", "根据正文生成短章名"],
+    ["片段改写", "0.45", "按选区和要求精确改写正文片段"],
+  ].forEach(([task, temperature, usage]) => {
+    if (state.routes.some((route) => route.task === task)) return;
     state.routes.push({
-      task: "章节标题",
+      task,
       provider: draftRoute.provider || "DeepSeek",
       model: draftRoute.model || "deepseek-chat",
-      temperature: "0.35",
-      usage: "根据正文生成短章名",
+      temperature,
+      usage,
     });
-  }
+  });
 }
 
 function normalizeChapterTitle(rawTitle = "", chapter = null) {
@@ -1945,6 +1957,98 @@ function buildChapterTitlePrompt(project, chapter) {
     "【正文节选】",
     text.length > 3600 ? `${text.slice(0, 2400)}\n\n...\n\n${text.slice(-900)}` : text,
   ].filter(Boolean).join("\n");
+}
+
+const selectionRewriteState = {
+  start: 0,
+  end: 0,
+  text: "",
+  result: "",
+};
+
+function selectedManuscriptRange() {
+  const editor = $("#manuscript");
+  if (!editor) return null;
+  const start = editor.selectionStart;
+  const end = editor.selectionEnd;
+  if (start === null || end === null || end <= start) return null;
+  const text = editor.value.slice(start, end);
+  if (!text.trim()) return null;
+  return { start, end, text };
+}
+
+function updateSelectionRewritePanel({ force = false } = {}) {
+  const panel = $("#selection-rewrite-panel");
+  if (!panel) return;
+  const range = selectedManuscriptRange();
+  if (!range) {
+    if (!force && document.activeElement === $("#selection-rewrite-instruction")) return;
+    panel.hidden = true;
+    $("#apply-selection-rewrite").disabled = true;
+    return;
+  }
+  selectionRewriteState.start = range.start;
+  selectionRewriteState.end = range.end;
+  selectionRewriteState.text = range.text;
+  selectionRewriteState.result = "";
+  panel.hidden = false;
+  $("#selection-rewrite-range").textContent = `${chapterWordCount(range.text)} 字 · ${range.start}-${range.end}`;
+  $("#selection-rewrite-source").textContent = compactMemoryText(range.text, 360);
+  $("#selection-rewrite-result").value = "";
+  $("#apply-selection-rewrite").disabled = true;
+}
+
+function buildSelectionRewritePrompt(project, chapter, selection, instruction) {
+  const fullText = $("#manuscript").value || chapter.manuscript || "";
+  const before = fullText.slice(Math.max(0, selection.start - 520), selection.start);
+  const after = fullText.slice(selection.end, selection.end + 520);
+  return [
+    `你是中文网文行文改写模型。请只改写《${project.title}》第 ${chapter.id} 章《${chapter.title}》中被选中的片段。`,
+    "只输出改写后的片段正文，不输出解释、标题、引号、列表、Markdown 或额外上下文。",
+    "必须保留原片段的剧情事实、人物认知、数值、称呼和视角，不新增胎记、秘密、金额、亲密桥段或未铺垫设定。",
+    "改写长度尽量接近原片段；如果原片段是一个句子，输出一个句子；如果原片段是多段，保持段落节奏。",
+    "优先改成人话、动作和心理选择，不要堆场景物品，不要模板腔，不要作者解释。",
+    instruction ? `作者具体要求：${instruction}` : "作者具体要求：去 AI 味，让人物更鲜活。写心理活动时必须推动下一步动作或台词。",
+    "",
+    "【项目文风规则】",
+    ...(combinedGenerationRules(project).length ? combinedGenerationRules(project).slice(0, 18) : ["句子直给，少解释，多动作和结果。"]),
+    "",
+    "【片段前文】",
+    before || "无",
+    "",
+    "【需要改写的原片段】",
+    selection.text,
+    "",
+    "【片段后文】",
+    after || "无",
+  ].filter(Boolean).join("\n");
+}
+
+function cleanSelectionRewrite(text = "") {
+  return cleanGeneratedDraft(text)
+    .replace(/^改写后[:：]\s*/i, "")
+    .replace(/^片段[:：]\s*/i, "")
+    .replace(/^["“”'‘’]+|["“”'‘’]+$/g, "")
+    .trim();
+}
+
+function recordSelectionRewriteMemory(project, chapter, before, after, instruction, source = "api") {
+  if (!project || !chapter || !before || !after) return;
+  const now = new Date().toISOString();
+  const memory = {
+    id: `rewrite-${chapter.id}-${Date.now().toString(36)}-${styleSampleHash(`${before}|${after}`).slice(0, 6)}`,
+    chapter: chapter.id,
+    title: chapter.title,
+    before: compactMemoryText(before, 220),
+    after: compactMemoryText(after, 260),
+    instruction: String(instruction || "").trim(),
+    source,
+    updatedAt: now,
+  };
+  project.selectionRewriteMemories = (project.selectionRewriteMemories || []).concat(memory).slice(-80);
+  project.selectionRewriteUpdatedAt = now;
+  project.learnedRules = (project.learnedRules || []).concat(`选区改写偏好：遇到类似“${compactMemoryText(before, 46)}”的问题，按“${compactMemoryText(after, 70)}”的方式处理；要求：${instruction || "去 AI 味，保留事实，强化人物选择。"}`).slice(-80);
+  chapter.selectionRewriteHistory = (chapter.selectionRewriteHistory || []).concat(memory).slice(-20);
 }
 
 function chapterModelMeta(chapter = {}) {
@@ -2049,6 +2153,28 @@ function recordTitleLlmUsage(project, chapter, result, previousTitle, nextTitle)
     provider: result.provider,
     model: result.model,
     at: chapter.titleGeneratedAt,
+  }).slice(-50);
+}
+
+function recordAuxiliaryLlmUsage(project, chapter, result, metaKey, logKey) {
+  const previousMeta = chapter.llmMeta ? { ...chapter.llmMeta } : null;
+  const previousError = chapter.llmError || "";
+  const previousDraftSource = chapter.draftSource || "";
+  const previousGeneratedAt = chapter.generatedAt || "";
+  recordLlmUsage(project, chapter, result);
+  chapter[metaKey] = { ...chapter.llmMeta, task: result.task };
+  chapter.llmMeta = previousMeta;
+  chapter.llmError = previousError;
+  chapter.draftSource = previousDraftSource;
+  chapter.generatedAt = previousGeneratedAt;
+  project[logKey] = (project[logKey] || []).concat({
+    chapter: chapter.id,
+    title: chapter.title,
+    provider: result.provider,
+    model: result.model,
+    task: result.task,
+    usage: result.usage || {},
+    at: new Date().toISOString(),
   }).slice(-50);
 }
 
@@ -4074,6 +4200,9 @@ function editorMetaHtml(project, chapter) {
   const titleMeta = chapter.titleLlmMeta?.source === "api"
     ? `<span class="meta-ok">标题模型：${chapter.titleLlmMeta.provider} / ${chapter.titleLlmMeta.model}</span>`
     : "";
+  const rewriteMeta = chapter.selectionRewriteLlmMeta?.source === "api"
+    ? `<span class="meta-ok">片段模型：${chapter.selectionRewriteLlmMeta.provider} / ${chapter.selectionRewriteLlmMeta.model}</span>`
+    : "";
   return `
     <span>目标 ${targetWords} 字</span>
     <span>当前 ${chapterWordCount(chapter.manuscript || "")} 字</span>
@@ -4085,6 +4214,7 @@ function editorMetaHtml(project, chapter) {
     <span class="${chapter.manualStyleEdited ? "meta-warn" : ""}">人工文风：${chapter.styleRevisionStatus || "未修改"}</span>
     <span class="${modelMeta.className}">${modelMeta.text}</span>
     ${titleMeta}
+    ${rewriteMeta}
   `;
 }
 
@@ -4264,6 +4394,81 @@ async function generateCurrentChapterTitle() {
       button.textContent = previousText;
     }
   }
+}
+
+async function rewriteSelectedManuscript() {
+  const project = currentProject();
+  const chapter = selectedChapter();
+  if (!chapter) return;
+  const range = selectedManuscriptRange() || (selectionRewriteState.text ? { ...selectionRewriteState } : null);
+  if (!range || !range.text?.trim()) {
+    showToast("先在正文里选中要改写的句子或片段。");
+    return;
+  }
+  if (chapterWordCount(range.text) > 900) {
+    showToast("选区太长，建议一次改写 900 字以内。");
+    return;
+  }
+  const instruction = $("#selection-rewrite-instruction")?.value.trim() || "";
+  const button = $("#rewrite-selection");
+  const label = $("#rewrite-selection span");
+  const previousLabel = label?.textContent || "改写选区";
+  if (button) button.disabled = true;
+  if (label) label.textContent = "改写中";
+  try {
+    selectionRewriteState.start = range.start;
+    selectionRewriteState.end = range.end;
+    selectionRewriteState.text = range.text;
+    const prompt = buildSelectionRewritePrompt(project, chapter, range, instruction);
+    const result = await callChapterModel(project, chapter, prompt, Math.max(128, chapterWordCount(range.text) + 80), "片段改写");
+    const rewritten = cleanSelectionRewrite(result.text);
+    if (!rewritten) throw new Error("模型返回片段为空");
+    selectionRewriteState.result = rewritten;
+    selectionRewriteState.modelResult = result;
+    $("#selection-rewrite-result").value = rewritten;
+    $("#apply-selection-rewrite").disabled = false;
+    recordAuxiliaryLlmUsage(project, chapter, { ...result, task: "片段改写" }, "selectionRewriteLlmMeta", "selectionRewriteLogs");
+    showToast("片段改写完成，可检查后应用。");
+  } catch (error) {
+    showToast(`片段改写失败：${error.message || "模型调用失败"}`);
+  } finally {
+    if (button) button.disabled = false;
+    if (label) label.textContent = previousLabel;
+  }
+}
+
+function applySelectionRewrite() {
+  const project = currentProject();
+  const chapter = selectedChapter();
+  const editor = $("#manuscript");
+  if (!project || !chapter || !editor) return;
+  const resultText = cleanSelectionRewrite($("#selection-rewrite-result")?.value || selectionRewriteState.result || "");
+  const before = selectionRewriteState.text || "";
+  const start = Number(selectionRewriteState.start || 0);
+  const end = Number(selectionRewriteState.end || 0);
+  if (!before.trim() || !resultText.trim() || end <= start) {
+    showToast("没有可应用的改写结果。");
+    return;
+  }
+  const currentSlice = editor.value.slice(start, end);
+  if (currentSlice !== before) {
+    showToast("正文选区已经变化，请重新选择片段再改写。");
+    updateSelectionRewritePanel({ force: true });
+    return;
+  }
+  createChapterVersionSnapshot(project, chapter, "片段改写前快照", { reason: "before-selection-rewrite" });
+  const nextText = `${editor.value.slice(0, start)}${resultText}${editor.value.slice(end)}`;
+  editor.value = nextText;
+  editor.focus();
+  editor.setSelectionRange(start, start + resultText.length);
+  recordSelectionRewriteMemory(project, chapter, before, resultText, $("#selection-rewrite-instruction")?.value.trim() || "", "api");
+  syncCurrentManuscript({ toast: false });
+  createChapterVersionSnapshot(project, chapter, "片段改写快照", { reason: "selection-rewrite" });
+  saveStateSoon("selection-rewrite");
+  scheduleProductionSync("selection-rewrite");
+  $("#selection-rewrite-panel").hidden = true;
+  $("#apply-selection-rewrite").disabled = true;
+  showToast("已应用片段改写，并记住这类句子问题。");
 }
 
 function updateWorkflowButtons(chapter) {
@@ -6731,6 +6936,8 @@ Object.assign(window, {
   saveCurrentDetailOutline,
   saveCurrentChapterTitle,
   generateCurrentChapterTitle,
+  rewriteSelectedManuscript,
+  applySelectionRewrite,
 });
 
 function runWriterCommand(commandName) {
@@ -6871,6 +7078,11 @@ function bindEvents() {
   });
 
   $("#manuscript").addEventListener("input", () => syncCurrentManuscript());
+  $("#manuscript").addEventListener("mouseup", () => updateSelectionRewritePanel());
+  $("#manuscript").addEventListener("keyup", () => updateSelectionRewritePanel());
+  $("#manuscript").addEventListener("select", () => updateSelectionRewritePanel());
+  $("#rewrite-selection").addEventListener("click", () => rewriteSelectedManuscript());
+  $("#apply-selection-rewrite").addEventListener("click", () => applySelectionRewrite());
   $("#chapter-title-input").addEventListener("keydown", (event) => {
     if (event.key !== "Enter") return;
     event.preventDefault();

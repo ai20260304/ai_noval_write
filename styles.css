@@ -1205,6 +1205,69 @@ select:focus {
   to { background-position: 180% 0; }
 }
 
+.selection-rewrite-panel {
+  display: grid;
+  gap: 10px;
+  padding: 12px 18px;
+  border-bottom: 1px solid var(--line);
+  background: #fbfdff;
+}
+
+.selection-rewrite-panel[hidden] {
+  display: none;
+}
+
+.selection-rewrite-head,
+.selection-rewrite-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.selection-rewrite-head strong {
+  font-size: 13px;
+}
+
+.selection-rewrite-head span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.selection-rewrite-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(220px, 0.7fr) minmax(260px, 0.9fr);
+  gap: 10px;
+}
+
+.selection-rewrite-body p,
+.selection-rewrite-body textarea {
+  min-height: 54px;
+  margin: 0;
+  padding: 9px 10px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.selection-rewrite-body p {
+  overflow: auto;
+  color: var(--muted);
+}
+
+.selection-rewrite-body textarea {
+  resize: vertical;
+}
+
+.selection-rewrite-body textarea:focus {
+  border-color: var(--accent);
+  outline: 0;
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12);
+}
+
 .manuscript {
   flex: 1;
   width: 100%;
