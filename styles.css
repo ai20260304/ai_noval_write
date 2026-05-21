@@ -1864,6 +1864,42 @@ select:focus {
   padding: 14px;
 }
 
+.prompt-library-panel {
+  grid-column: 1 / -1;
+}
+
+.prompt-library-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  padding: 14px;
+}
+
+.prompt-library-item {
+  display: grid;
+  gap: 6px;
+  padding: 11px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--surface);
+}
+
+.prompt-library-item strong {
+  font-size: 13px;
+}
+
+.prompt-library-item span,
+.prompt-library-item p {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.prompt-library-item p {
+  margin-top: 2px;
+  color: var(--text);
+}
+
 .background-card,
 .research-card {
   display: grid;

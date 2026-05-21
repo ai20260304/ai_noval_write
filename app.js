@@ -321,6 +321,10 @@ function ensureStyleControls(project) {
     ? normalizeStyleBlendProfiles(project.styleBlendProfiles)
     : normalizeStyleBlendProfiles(DEFAULT_STYLE_BLEND_PROFILES);
   project.styleFusionGoal = String(project.styleFusionGoal || DEFAULT_STYLE_FUSION_GOAL).trim();
+  if (!Array.isArray(project.deepseekDeAiPromptLibrary) || project.deepseekDeAiPromptLibraryVersion !== "deepseek-deai-v1") {
+    project.deepseekDeAiPromptLibrary = DEEPSEEK_DE_AI_PROMPT_LIBRARY.map((item) => ({ ...item }));
+    project.deepseekDeAiPromptLibraryVersion = "deepseek-deai-v1";
+  }
 }
 
 function styleTagRules(project) {
@@ -347,6 +351,13 @@ function styleFusionRules(project) {
     "融合冲突处理：剧情清晰 > 人设稳定 > 样章句式 > 人工标签 > 题材装饰；如果冲突，保留推进，降低装饰。",
     ...activeProfiles.map((profile) => `融合来源｜${profile.name}：${profile.rule || "按该来源的有效规则参与生成。"}`),
   ];
+}
+
+function deepSeekDeAiRules(project) {
+  ensureStyleControls(project);
+  return (project?.deepseekDeAiPromptLibrary || DEEPSEEK_DE_AI_PROMPT_LIBRARY)
+    .filter((item) => item && item.title !== "DeepSeek 参数建议")
+    .map((item) => `DeepSeek去AI味｜${item.title}：${item.prompt}`);
 }
 
 function currentProject() {
@@ -1103,6 +1114,7 @@ function combinedGenerationRules(project) {
   const wordRules = generationWordRules(project?.chapterTargetWords || 2200);
   const fusionRules = styleFusionRules(project);
   const tagRules = styleTagRules(project);
+  const deepSeekRules = deepSeekDeAiRules(project);
   const learned = Array.isArray(project?.learnedRules) ? project.learnedRules : [];
   const revisionRules = (project?.styleRevisionSamples || []).length
     ? [
@@ -1122,6 +1134,7 @@ function combinedGenerationRules(project) {
     ...characterDepthRules(),
     ...fusionRules,
     ...tagRules,
+    ...deepSeekRules,
     ...learned.filter((rule) => !wordRules.includes(rule)),
     ...revisionRules,
     ...selectionRules,
@@ -1794,6 +1807,7 @@ function buildChapterGenerationPrompt(project, chapter, detail) {
   const contract = buildChapterGenerationContract(project, chapter);
   const goldFingerRules = buildGoldFingerRules(project);
   const continuity = buildChapterContinuityMemory(project, chapter);
+  const deepSeekRules = deepSeekDeAiRules(project);
   const sceneLines = (detail?.scenes || [])
     .map((scene, index) => {
       const systemLines = (scene.systemLines || []).length ? `（系统线：${scene.systemLines.join("；")}）` : "";
@@ -1835,6 +1849,9 @@ function buildChapterGenerationPrompt(project, chapter, detail) {
     "不要写成“地点+物品清单”。出租屋、片场、后台、电话亭等场景只保留能压住人物处境的 1-2 个细节，重点写他为什么不敢退、为什么还要赌、他下一步怎么选。",
     "心理不是抒情，是行动前的拉扯：怕丢脸、怕没钱、怕错过机会、想翻身、想保住尊严，这些必须推动下一句动作或台词。",
     "",
+    "【DeepSeek 去 AI 味提示词库】",
+    ...deepSeekRules,
+    "",
     "【金手指设定】",
     ...(goldFingerRules.length ? goldFingerRules : ["预言系统：短期事件预知，必须有消耗、代价和结果回收。"]),
   ].filter(Boolean).join("\n");
@@ -1853,6 +1870,7 @@ function buildChapterFixPrompt(project, chapter, issues = []) {
   const contract = buildChapterGenerationContract(project, chapter);
   const continuity = buildChapterContinuityMemory(project, chapter);
   const goldFingerRules = buildGoldFingerRules(project);
+  const deepSeekRules = deepSeekDeAiRules(project);
   const fixPlan = buildChapterFixPlan(chapter);
   const targetWords = activeTargetWords(project, chapter);
   const manuscript = cleanGeneratedDraft(chapter.manuscript || "");
@@ -1894,6 +1912,9 @@ function buildChapterFixPrompt(project, chapter, issues = []) {
     "心理活动要和下一步动作绑定：怕丢脸、怕没钱、怕错过机会、想翻身、想保护对方，都要推动人物做选择。",
     "信息必须放进争执、交易、电话、通告、试镜、合同、系统面板或现场反馈里，不要站在原地解释设定。",
     "每个场景至少有一个结果变化：信任、资源、反噬、星运、身体强化、赋能收益、角色边界或下一章压力。",
+    "",
+    "【DeepSeek 去 AI 味提示词库】",
+    ...deepSeekRules,
     "",
     "【金手指设定】",
     ...(goldFingerRules.length ? goldFingerRules : ["预言系统：短期事件预知，必须有消耗、代价和结果回收。"]),
@@ -2580,6 +2601,49 @@ const ENTERTAINMENT_PATTERNS = [
   { title: "舆论多视角", detail: "营销号、粉丝群、路人弹幕、狗仔偷拍视频、经纪人会议交替推进，避免单线解释。" },
   { title: "行业时间钉", detail: "用真实行业节点做锚点：选秀年、流量时代、短视频宣发、电影节、平台剧招商，不完全架空。" },
   { title: "爽点后果", detail: "每次打脸都要带来资源、口碑、关系或敌人升级，不能只写全网震惊。" },
+];
+
+const DEEPSEEK_DE_AI_PROMPT_LIBRARY = [
+  {
+    title: "角色锁定：不是润色器",
+    detail: "把 DeepSeek 先锁成商业网文主编，目标是像真人作者修稿，不追求文艺化。",
+    prompt: "你不是润色器，也不是散文作者。你是中文商业网文主编。目标不是把句子写漂亮，而是删掉 AI 味、解释腔和模板腔，让正文像真人作者在移动端连载。只输出小说正文。",
+  },
+  {
+    title: "内部四步：查、删、换、验",
+    detail: "让模型先做内部审查再输出，避免它边解释边改。",
+    prompt: "内部执行但不要输出：1. 标出解释腔、总结腔、模板修辞、物品清单、抽象情绪；2. 删除不推进剧情的句子；3. 用人物动作、台词、选择和结果替换；4. 检查禁词、事实、数值、连续性。最终只输出修订后的正文。",
+  },
+  {
+    title: "解释腔硬删",
+    detail: "专门压住“他知道、这意味着、真正、只有结果”等 DeepSeek 常见总结句。",
+    prompt: "禁止用作者口吻解释人物处境。少写“他知道/她知道/这意味着/真正/只有结果/必须/不能/不是A而是B”。如果必须表达心理，改成一句人物当下会想的话，后面立刻接动作、台词或选择。",
+  },
+  {
+    title: "物品清单替换",
+    detail: "保留会影响选择的细节，删掉静态陈设堆砌。",
+    prompt: "不要写“房间里有A、B、C、D”式陈设清单。场景最多保留1-2个会影响人物选择的细节，其余篇幅写人物为什么不敢退、为什么要赌、下一步怎么做。",
+  },
+  {
+    title: "比喻模板禁用",
+    detail: "压掉“像定时炸弹/像问号/像水表”等泛化比喻。",
+    prompt: "少用比喻和漂亮句。禁用“像XX一样、像XX的XX、仿佛、似乎、莫名、隐隐、说不出的、命运齿轮、空气凝固、复杂情绪”。能写动作就不要写比喻。",
+  },
+  {
+    title: "网文节奏约束",
+    detail: "用选择、阻碍、结果把段落钉住。",
+    prompt: "每300字至少出现一次可见变化：信任变化、反噬变化、资源变化、人物选择、电话/通告/合同/试镜反馈、对手阻碍或章末压力。段落不要原地解释。",
+  },
+  {
+    title: "事实保护",
+    detail: "防止修稿为了去 AI 味乱加胎记、金额、关系和未来设定。",
+    prompt: "保留原文事实、人物认知、金额、数值、时间线和细纲事件。禁止新增胎记、私密身体特征、家庭秘密、亲密桥段、未铺垫角色或未来章节信息。",
+  },
+  {
+    title: "DeepSeek 参数建议",
+    detail: "正文初稿可高一点，修稿要稳定；当前库默认给修稿用 0.55-0.75。",
+    prompt: "章节正文可用较高创造性；去AI味修稿建议温度0.55-0.75，重点是稳定保事实、删解释腔、补动作和对话，不要让模型自由重写剧情。",
+  },
 ];
 
 const PUBLISHABLE_ROMANCE_RULES = [
@@ -3580,6 +3644,8 @@ function buildImportedProject(text, sourceName = "") {
     forbiddenWordsSeedVersion: FORBIDDEN_WORD_LIBRARY_VERSION,
     publicBackgrounds: entertainmentPreset ? PUBLIC_BACKGROUND_LIBRARY : [],
     storyRoutes: entertainmentPreset ? STORY_ROUTE_LIBRARY : [],
+    deepseekDeAiPromptLibrary: DEEPSEEK_DE_AI_PROMPT_LIBRARY.map((item) => ({ ...item })),
+    deepseekDeAiPromptLibraryVersion: "deepseek-deai-v1",
     parseWarnings: outlineRows.length <= 1 ? ["未识别到完整章节表，已生成兜底节点。"] : [],
   };
 }
@@ -5025,6 +5091,7 @@ function renderSkills() {
     { name: "娱乐圈爽文", task: "题材模板", desc: "舆论反转、资源压制、热搜节点和粉丝反馈。", active: isEntertainmentProject(project) },
     { name: "可发表暧昧张力", task: "尺度审查", desc: "成年人、自愿、留白转场、写后果，不写露骨动作和身体细节。", active: isEntertainmentProject(project) },
     { name: "娱乐圈去 AI 味", task: "改写 / 评分", desc: "用通告单、品牌 brief、试镜、宣发群、后台监视器等具体物件替代模板腔。", active: true },
+    { name: "DeepSeek 去 AI 味提示词", task: "章节正文 / 去 AI 改写", desc: "联网整理的分层提示：角色锁定、内部四步、解释腔硬删、事实保护。", active: true },
     { name: "一致性审查规则", task: "审查", desc: "检查角色轨迹、伏笔回收、时间线和物资数量。", active: true },
   ];
 
@@ -5058,6 +5125,16 @@ function renderSkills() {
   renderForbiddenWordManager("#skill-forbidden-list");
   $("#story-route-list").innerHTML = (project.storyRoutes?.length ? project.storyRoutes : STORY_ROUTE_LIBRARY)
     .map((route) => `<li>${route}</li>`)
+    .join("");
+  const promptLibrary = project.deepseekDeAiPromptLibrary?.length ? project.deepseekDeAiPromptLibrary : DEEPSEEK_DE_AI_PROMPT_LIBRARY;
+  $("#deepseek-deai-prompt-list").innerHTML = promptLibrary
+    .map((item) => `
+      <article class="prompt-library-item">
+        <strong>${escapeHtml(item.title)}</strong>
+        <span>${escapeHtml(item.detail)}</span>
+        <p>${escapeHtml(item.prompt)}</p>
+      </article>
+    `)
     .join("");
 }
 
@@ -5761,6 +5838,8 @@ async function trainStyle() {
     ensureForbiddenWords(project);
     project.publicBackgrounds = PUBLIC_BACKGROUND_LIBRARY;
     project.storyRoutes = STORY_ROUTE_LIBRARY;
+    project.deepseekDeAiPromptLibrary = DEEPSEEK_DE_AI_PROMPT_LIBRARY.map((item) => ({ ...item }));
+    project.deepseekDeAiPromptLibraryVersion = "deepseek-deai-v1";
   }
   renderAll();
   await saveStateNowWithMessage("train-style", `文风画像已重新训练：${analysis.sampleCount} 组样文，${analysis.totalChars} 字，置信度 ${analysis.confidence}%。`);
