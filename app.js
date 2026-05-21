@@ -3741,7 +3741,6 @@ function renderChapterScore(chapter) {
     return;
   }
 
-  const issues = chapter.reviewIssues || [];
   const fixPlan = buildChapterFixPlan(chapter);
   $("#chapter-score-total").textContent = `${chapter.score} 分`;
   $("#chapter-score-detail").innerHTML = [
@@ -3762,8 +3761,6 @@ function renderChapterScore(chapter) {
     )
     .join("")
     + (chapter.scoreNotes?.length ? `<p class="score-notes">${chapter.scoreNotes.join("；")}</p>` : "")
-    + (issues.length
-      ? `<div class="score-issue-summary"><strong>已标记 ${issues.length} 处修改</strong><span>按编号逐项改完，再重新审查打分。</span></div><ul class="review-issue-list">${issues.map((issue, index) => `<li class="review-issue-item issue-${issue.level}"><span class="issue-index">${String(index + 1).padStart(2, "0")}</span><div><strong>修改 ${index + 1}｜${issue.type}｜${issue.level}</strong><p>${issue.text}</p><em>${issue.fix}</em></div></li>`).join("")}</ul>` : "")
     + (fixPlan.length
       ? `<div class="score-plan"><strong>90 分路线</strong><ol>${fixPlan.map((item) => `<li>${item}</li>`).join("")}</ol></div>`
       : chapter.reviewPassed
