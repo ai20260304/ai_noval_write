@@ -3741,7 +3741,6 @@ function renderChapterScore(chapter) {
     return;
   }
 
-  const fixPlan = buildChapterFixPlan(chapter);
   $("#chapter-score-total").textContent = `${chapter.score} 分`;
   $("#chapter-score-detail").innerHTML = [
     ["剧情推进", chapter.scoreDetail.plot],
@@ -3761,11 +3760,9 @@ function renderChapterScore(chapter) {
     )
     .join("")
     + (chapter.scoreNotes?.length ? `<p class="score-notes">${chapter.scoreNotes.join("；")}</p>` : "")
-    + (fixPlan.length
-      ? `<div class="score-plan"><strong>90 分路线</strong><ol>${fixPlan.map((item) => `<li>${item}</li>`).join("")}</ol></div>`
-      : chapter.reviewPassed
-        ? `<p class="score-notes">${chapter.status === "完成" ? "审查通过，当前章节已完成。" : "审查通过，可以标记完成。"}</p>`
-        : "");
+    + (chapter.reviewPassed
+      ? `<p class="score-notes">${chapter.status === "完成" ? "审查通过，当前章节已完成。" : "审查通过，可以标记完成。"}</p>`
+      : "");
 }
 
 function updateWorkflowButtons(chapter) {
