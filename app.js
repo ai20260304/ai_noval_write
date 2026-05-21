@@ -350,7 +350,7 @@ function styleFusionRules(project) {
 
 function currentProject() {
   const project = state.projects.find((item) => item.id === state.activeProjectId) || state.projects[0];
-  ensureProjectPlanning(project);
+  ensureProjectPlanning(project, { light: true });
   return project;
 }
 
@@ -3319,7 +3319,21 @@ function refreshLegacyChapterScores(project) {
   return changed;
 }
 
-function ensureProjectPlanning(project) {
+const projectPlanningKeys = new WeakMap();
+
+function projectPlanningKey(project) {
+  return [
+    CURRENT_PROJECT_PLAN_VERSION,
+    project?.chapterTargetWords || "",
+    project?.planVersion || "",
+    project?.outlineUpdatedAt || "",
+    project?.outlineRows?.length || 0,
+    project?.chapters?.length || 0,
+    (project?.goldFingerPowers || []).map((power) => typeof power === "string" ? power : `${power?.name || ""}:${power?.effect || ""}`).join("|"),
+  ].join("::");
+}
+
+function ensureProjectPlanning(project, { force = false, light = false } = {}) {
   if (!project) return;
   project.chapterTargetWords = Math.min(3000, Math.max(2200, Number(project.chapterTargetWords) || 2200));
   if (typeof project.styleSample !== "string") project.styleSample = DEFAULT_STYLE_SAMPLE;
@@ -3341,25 +3355,45 @@ function ensureProjectPlanning(project) {
       roughOutline: existingById.get(chapter.id)?.roughOutline || chapter.roughOutline,
       targetWords: project.chapterTargetWords,
     }));
+    force = true;
   }
 
   if (project.outlineRows?.length && project.planVersion !== CURRENT_PROJECT_PLAN_VERSION) {
-    syncChaptersFromOutlineRows(project, { forceDetail: false });
-    project.planVersion = CURRENT_PROJECT_PLAN_VERSION;
+    if (light) {
+      project.needsPlanMigration = CURRENT_PROJECT_PLAN_VERSION;
+    } else {
+      syncChaptersFromOutlineRows(project, { forceDetail: false });
+      project.planVersion = CURRENT_PROJECT_PLAN_VERSION;
+      delete project.needsPlanMigration;
+      force = true;
+    }
   }
 
-  project.chapters?.forEach((chapter) => {
-    chapter.targetWords = activeTargetWords(project, chapter);
-    if (!chapter.manuscript) chapter.manuscript = "";
-    migrateChapterOutline(chapter, project);
-    normalizeChapterDraft(project, chapter, 3000);
-  });
+  const planningKey = projectPlanningKey(project);
+  const needsChapterPass = force && !light;
 
-  refreshLegacyChapterScores(project);
+  if (needsChapterPass) {
+    project.chapters?.forEach((chapter) => {
+      chapter.targetWords = activeTargetWords(project, chapter);
+      if (!chapter.manuscript) chapter.manuscript = "";
+      migrateChapterOutline(chapter, project);
+      normalizeChapterDraft(project, chapter, 3000);
+    });
+    refreshLegacyChapterScores(project);
+    projectPlanningKeys.set(project, planningKey);
+    project.words = projectWordCount(project);
+    const scores = (project.chapters || []).filter((chapter) => chapter.score).map((chapter) => chapter.score);
+    project.averageScore = scores.length ? Math.round(scores.reduce((sum, value) => sum + value, 0) / scores.length) : null;
+  } else if (!projectPlanningKeys.has(project)) {
+    projectPlanningKeys.set(project, planningKey);
+  }
+
   project.chapterPlanCount = project.chapters?.length || 0;
-  project.words = projectWordCount(project);
-  const scores = project.chapters.filter((chapter) => chapter.score).map((chapter) => chapter.score);
-  project.averageScore = scores.length ? Math.round(scores.reduce((sum, value) => sum + value, 0) / scores.length) : null;
+  if (typeof project.words !== "number") project.words = projectWordCount(project);
+  if (project.averageScore === undefined) {
+    const scores = (project.chapters || []).filter((chapter) => chapter.score).map((chapter) => chapter.score);
+    project.averageScore = scores.length ? Math.round(scores.reduce((sum, value) => sum + value, 0) / scores.length) : null;
+  }
 }
 
 function buildImportedProject(text, sourceName = "") {
@@ -5265,17 +5299,40 @@ async function runProductionEditorAgent() {
   showToast(`多轮编辑 Agent 已生成第 ${payload.run.chapterId} 章修订流程。`);
 }
 
+function prepareChapterForRender(project, chapter, { refreshFacts = false } = {}) {
+  if (!project || !chapter) return;
+  chapter.targetWords = activeTargetWords(project, chapter);
+  if (typeof chapter.manuscript !== "string") chapter.manuscript = "";
+  if (isLegacyDetailedOutline(chapter.detailedOutline)) {
+    migrateChapterOutline(chapter, project);
+  }
+  normalizeChapterDraft(project, chapter, 3000);
+  refreshChapterStorySnapshot(project, chapter);
+  if (refreshFacts && (chapter.manuscript || chapter.detailedOutline)) {
+    refreshChapterFactCache(project, chapter);
+  }
+}
+
+function refreshVisibleChapterCaches(project = currentProject()) {
+  if (!project) return;
+  ensureProjectPlanning(project, { light: true });
+  const activeChapter = (project.chapters || []).find((chapter) => Number(chapter.id) === Number(state.activeChapterId))
+    || (project.chapters || [])[0]
+    || null;
+  if (!activeChapter) return;
+  const previous = previousChapterFor(project, activeChapter.id);
+  const next = nextChapterFor(project, activeChapter.id);
+  [previous, activeChapter, next]
+    .filter(Boolean)
+    .forEach((chapter) => prepareChapterForRender(project, chapter, { refreshFacts: chapter === activeChapter }));
+  project.chapterPlanCount = project.chapters?.length || 0;
+  if (typeof project.words !== "number") project.words = projectWordCount(project);
+}
+
 function renderAll() {
   ensureDefaultRoutes();
-  state.projects.forEach((project) => {
-    ensureProjectPlanning(project);
-    sortChaptersById(project.chapters || []).forEach((chapter) => {
-      if (chapter.manuscript || chapter.detailedOutline) {
-        refreshChapterStorySnapshot(project, chapter);
-        refreshChapterFactCache(project, chapter);
-      }
-    });
-  });
+  state.projects.forEach((project) => ensureProjectPlanning(project, { light: true }));
+  refreshVisibleChapterCaches(currentProject());
   renderProjectSelect();
   renderProjectList();
   renderDashboard();
@@ -6887,7 +6944,7 @@ function recordManualStyleRevision(project, chapter, previousText, nextText) {
   project.styleRevisionUpdatedAt = chapter.styleRevisionUpdatedAt;
 }
 
-function syncCurrentManuscript({ persist = true, toast = false } = {}) {
+function syncCurrentManuscript({ persist = true, toast = false, refreshFacts = false } = {}) {
   const chapter = selectedChapter();
   if (!chapter) return;
   const project = currentProject();
@@ -6895,25 +6952,38 @@ function syncCurrentManuscript({ persist = true, toast = false } = {}) {
   const previousText = chapter.manuscript || "";
   const nextText = $("#manuscript").value;
   const normalizedText = trimDraftToWordLimit(nextText, 3000);
-  recordManualStyleRevision(project, chapter, previousText, normalizedText);
+  const shouldRefreshMemory = toast || refreshFacts;
+  if (shouldRefreshMemory) {
+    recordManualStyleRevision(project, chapter, previousText, normalizedText);
+  } else if (previousText !== normalizedText) {
+    chapter.manualStyleEdited = true;
+    chapter.styleRevisionStatus = "正文已修改，保存后学习";
+  }
   if (toast && previousText !== normalizedText) {
     createChapterVersionSnapshot(project, chapter, "手动保存前快照", { reason: "before-manual-save" });
   }
-  applyContinuityGate(project, chapter);
+  const previousWordCount = chapterWordCount(previousText);
   chapter.manuscript = normalizedText;
   chapter.wordCount = chapterWordCount(chapter.manuscript);
   chapter.progress = Math.min(99, Math.round((chapter.wordCount / targetWords) * 100));
   updateChapterProgressState(project, chapter);
-  project.words = projectWordCount(project);
-  refreshChapterStorySnapshot(project, chapter);
-  refreshChapterFactCache(project, chapter);
-  const nextChapter = nextChapterFor(project, chapter.id);
-  if (nextChapter) refreshProjectStoryMemory(project, nextChapter);
-  const continuity = refreshProjectStoryMemory(project, chapter);
-  renderChapters(chapter.id);
+  project.words = Number.isFinite(Number(project.words))
+    ? Math.max(0, Number(project.words || 0) - previousWordCount + chapter.wordCount)
+    : projectWordCount(project);
+  if (shouldRefreshMemory) {
+    applyContinuityGate(project, chapter);
+    refreshChapterStorySnapshot(project, chapter);
+    refreshChapterFactCache(project, chapter);
+    const nextChapter = nextChapterFor(project, chapter.id);
+    if (toast && nextChapter) refreshProjectStoryMemory(project, nextChapter);
+    const continuity = refreshProjectStoryMemory(project, chapter);
+    renderChapters(chapter.id);
+    $("#chapter-continuity").innerHTML = renderContinuityMemory(continuity) + renderContinuityGate(chapter);
+    renderChapterVersions(chapter);
+  } else {
+    chapter.memoryDraftDirty = previousText !== normalizedText;
+  }
   $("#editor-meta").innerHTML = editorMetaHtml(project, chapter);
-  $("#chapter-continuity").innerHTML = renderContinuityMemory(continuity) + renderContinuityGate(chapter);
-  renderChapterVersions(chapter);
   if (persist) saveStateSoon("manuscript-edit");
   if (toast) {
     createChapterVersionSnapshot(project, chapter, "手动保存快照", { reason: "manual-save" });
