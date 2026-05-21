@@ -1963,6 +1963,7 @@ const selectionRewriteState = {
   start: 0,
   end: 0,
   text: "",
+  sourcePreview: "",
   result: "",
   running: false,
   progressTimer: null,
@@ -1981,12 +1982,32 @@ function selectedManuscriptRange() {
   return { start, end, text };
 }
 
+function lockedSelectionRewriteRange() {
+  const liveRange = selectedManuscriptRange();
+  if (liveRange) return liveRange;
+  if (selectionRewriteState.text?.trim()) {
+    return {
+      start: Number(selectionRewriteState.start || 0),
+      end: Number(selectionRewriteState.end || 0),
+      text: selectionRewriteState.text,
+    };
+  }
+  const editorText = $("#manuscript")?.value || "";
+  const sourceText = $("#selection-rewrite-source")?.textContent?.trim() || "";
+  if (!editorText || !sourceText) return null;
+  const start = editorText.indexOf(sourceText);
+  if (start < 0) return null;
+  return { start, end: start + sourceText.length, text: sourceText };
+}
+
 function updateSelectionRewritePanel({ force = false } = {}) {
   const panel = $("#selection-rewrite-panel");
   if (!panel) return;
   const range = selectedManuscriptRange();
   if (!range) {
     if (!force && document.activeElement === $("#selection-rewrite-instruction")) return;
+    if (!force && document.activeElement === $("#selection-rewrite-result")) return;
+    if (!force && selectionRewriteState.text) return;
     panel.hidden = true;
     $("#apply-selection-rewrite").disabled = true;
     resetSelectionRewriteProgress();
@@ -1995,10 +2016,11 @@ function updateSelectionRewritePanel({ force = false } = {}) {
   selectionRewriteState.start = range.start;
   selectionRewriteState.end = range.end;
   selectionRewriteState.text = range.text;
+  selectionRewriteState.sourcePreview = compactMemoryText(range.text, 360);
   selectionRewriteState.result = "";
   panel.hidden = false;
   $("#selection-rewrite-range").textContent = `${chapterWordCount(range.text)} 字 · ${range.start}-${range.end}`;
-  $("#selection-rewrite-source").textContent = compactMemoryText(range.text, 360);
+  $("#selection-rewrite-source").textContent = selectionRewriteState.sourcePreview;
   $("#selection-rewrite-result").value = "";
   $("#apply-selection-rewrite").disabled = true;
   resetSelectionRewriteProgress();
@@ -2056,6 +2078,20 @@ function resetSelectionRewriteProgress() {
   if (box) {
     box.hidden = true;
     box.classList.remove("running", "failed");
+  }
+}
+
+function runSelectionRewriteFromClick() {
+  const panel = $("#selection-rewrite-panel");
+  if (panel) panel.hidden = false;
+  setSelectionRewriteProgress(2, "收到改写请求", "正在读取当前章节、选区和改写要求。");
+  const result = rewriteSelectedManuscript();
+  if (result?.catch) {
+    result.catch((error) => {
+      const message = error.message || "片段改写失败";
+      failSelectionRewriteProgress(message);
+      showToast(`片段改写失败：${message}`);
+    });
   }
 }
 
@@ -4495,12 +4531,14 @@ async function rewriteSelectedManuscript() {
   const project = currentProject();
   const chapter = selectedChapter();
   if (!chapter) return;
-  const range = selectedManuscriptRange() || (selectionRewriteState.text ? { ...selectionRewriteState } : null);
+  const range = lockedSelectionRewriteRange();
   if (!range || !range.text?.trim()) {
+    failSelectionRewriteProgress("没有读取到正文选区，请先在正文里选中要改写的句子或片段。");
     showToast("先在正文里选中要改写的句子或片段。");
     return;
   }
   if (chapterWordCount(range.text) > 900) {
+    failSelectionRewriteProgress("选区太长，建议一次改写 900 字以内。");
     showToast("选区太长，建议一次改写 900 字以内。");
     return;
   }
@@ -7106,7 +7144,31 @@ function runWriterCommand(commandName) {
   }
 }
 
+let selectionRewriteActionAt = 0;
+
+function handleSelectionRewriteAction(event) {
+  const rewriteButton = event.target.closest("#rewrite-selection");
+  const applyButton = event.target.closest("#apply-selection-rewrite");
+  if (!rewriteButton && !applyButton) return false;
+  event.preventDefault();
+  event.stopPropagation();
+
+  const now = Date.now();
+  if (now - selectionRewriteActionAt < 350) return true;
+  selectionRewriteActionAt = now;
+
+  if (rewriteButton) {
+    if (!rewriteButton.disabled) runSelectionRewriteFromClick();
+    return true;
+  }
+  if (applyButton && !applyButton.disabled) applySelectionRewrite();
+  return true;
+}
+
 function bindEvents() {
+  document.addEventListener("pointerdown", handleSelectionRewriteAction, true);
+  document.addEventListener("click", handleSelectionRewriteAction, true);
+
   $$(".nav-item").forEach((item) => item.addEventListener("click", () => switchPage(item.dataset.page)));
   $$("[data-jump]").forEach((item) => item.addEventListener("click", () => switchPage(item.dataset.jump)));
   document.addEventListener("pointerdown", (event) => {
@@ -7230,8 +7292,6 @@ function bindEvents() {
   $("#manuscript").addEventListener("mouseup", () => updateSelectionRewritePanel());
   $("#manuscript").addEventListener("keyup", () => updateSelectionRewritePanel());
   $("#manuscript").addEventListener("select", () => updateSelectionRewritePanel());
-  $("#rewrite-selection").addEventListener("click", () => rewriteSelectedManuscript());
-  $("#apply-selection-rewrite").addEventListener("click", () => applySelectionRewrite());
   $("#chapter-title-input").addEventListener("keydown", (event) => {
     if (event.key !== "Enter") return;
     event.preventDefault();
