@@ -176,6 +176,7 @@ const state = {
     { task: "章节正文", provider: "DeepSeek", model: "deepseek-chat", temperature: "0.8", usage: "高性价比正文初稿" },
     { task: "文风学习", provider: "Claude / Anthropic", model: "claude-sonnet-4.5", temperature: "0.2", usage: "样章分析和规则归纳" },
     { task: "完稿评分", provider: "GPT / OpenAI", model: "gpt-5.2", temperature: "0.1", usage: "剧情、文风、爽点评分" },
+    { task: "章节标题", provider: "DeepSeek", model: "deepseek-chat", temperature: "0.35", usage: "根据正文生成短章名" },
     { task: "一致性审查", provider: "自定义供应商", model: "gpt-5.5", temperature: "0.1", usage: "长上下文事实校验" },
     { task: "公开资料补强", provider: "自定义供应商", model: "gpt-5.5", temperature: "0.2", usage: "联网资料摘要与故事路线补强" },
     { task: "尺度红线审查", provider: "Claude / Anthropic", model: "claude-sonnet-4.5", temperature: "0", usage: "暧昧、亲密、未成年和平台风险审查" },
@@ -1900,6 +1901,52 @@ function routeForTask(taskName = "章节正文") {
     || state.routes[0];
 }
 
+function ensureDefaultRoutes() {
+  state.routes = Array.isArray(state.routes) ? state.routes : [];
+  if (!state.routes.some((route) => route.task === "章节标题")) {
+    const draftRoute = routeForTask("章节正文") || state.routes[0] || { provider: "DeepSeek", model: "deepseek-chat", temperature: "0.5" };
+    state.routes.push({
+      task: "章节标题",
+      provider: draftRoute.provider || "DeepSeek",
+      model: draftRoute.model || "deepseek-chat",
+      temperature: "0.35",
+      usage: "根据正文生成短章名",
+    });
+  }
+}
+
+function normalizeChapterTitle(rawTitle = "", chapter = null) {
+  const fallback = chapter ? `第${chapter.id}章` : "未命名章节";
+  return String(rawTitle || "")
+    .replace(/^[\s"'“”‘’《》【】\[\]#：:，,。.]+|[\s"'“”‘’《》【】\[\]#：:，,。.]+$/g, "")
+    .replace(/^第\s*\d+\s*章\s*/i, "")
+    .replace(/^(章节标题|标题|章名|候选)[:：]\s*/i, "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)[0]
+    ?.slice(0, 24) || fallback;
+}
+
+function buildChapterTitlePrompt(project, chapter) {
+  const text = cleanGeneratedDraft(chapter.manuscript || "");
+  const tail = chapterEndingMemory(chapter);
+  return [
+    `请根据《${project.title}》第 ${chapter.id} 章正文生成一个适合中文网文的章节名。`,
+    "只输出一个章节名，不要输出解释、编号、书名号、引号、候选列表或标点装饰。",
+    "要求：8-14 个汉字优先；直给、有爽点或钩子；贴合正文核心事件；不要标题党到和正文不符。",
+    "避免：命运齿轮、这一刻、风起云涌、事情并不简单、空气凝固等模板腔。",
+    "",
+    "【本章粗纲】",
+    chapter.outline || "",
+    "",
+    "【章末落点】",
+    tail || "",
+    "",
+    "【正文节选】",
+    text.length > 3600 ? `${text.slice(0, 2400)}\n\n...\n\n${text.slice(-900)}` : text,
+  ].filter(Boolean).join("\n");
+}
+
 function chapterModelMeta(chapter = {}) {
   if (chapter.llmMeta?.source === "api") {
     return {
@@ -1971,6 +2018,37 @@ function recordLlmUsage(project, chapter, result) {
     chapter: chapter.id,
     title: chapter.title,
     ...meta,
+  }).slice(-50);
+}
+
+function recordTitleLlmUsage(project, chapter, result, previousTitle, nextTitle) {
+  const previousMeta = chapter.llmMeta ? { ...chapter.llmMeta } : null;
+  const previousError = chapter.llmError || "";
+  const previousDraftSource = chapter.draftSource || "";
+  const previousGeneratedAt = chapter.generatedAt || "";
+  recordLlmUsage(project, chapter, result);
+  chapter.titleLlmMeta = { ...chapter.llmMeta, task: result.task || "章节标题" };
+  chapter.llmMeta = previousMeta;
+  chapter.llmError = previousError;
+  chapter.draftSource = previousDraftSource;
+  chapter.generatedAt = previousGeneratedAt;
+  chapter.titleGeneratedAt = new Date().toISOString();
+  chapter.titleHistory = (chapter.titleHistory || []).concat({
+    at: chapter.titleGeneratedAt,
+    source: "api",
+    previousTitle,
+    nextTitle,
+    provider: result.provider,
+    model: result.model,
+    usage: result.usage || {},
+  }).slice(-20);
+  project.titleGenerationLogs = (project.titleGenerationLogs || []).concat({
+    chapter: chapter.id,
+    previousTitle,
+    nextTitle,
+    provider: result.provider,
+    model: result.model,
+    at: chapter.titleGeneratedAt,
   }).slice(-50);
 }
 
@@ -2141,6 +2219,7 @@ function inferProviderApiType(provider = {}) {
 }
 
 function normalizeProviderConfig() {
+  ensureDefaultRoutes();
   (state.providers || []).forEach((provider) => {
     provider.apiType = inferProviderApiType(provider);
     if (provider.id === "gemini" && provider.name === "Gemini" && isMaskedApiKey(provider.key)) {
@@ -2179,6 +2258,7 @@ function normalizeProviderSecrets() {
 
 function snapshotState() {
   normalizeProviderSecrets();
+  ensureDefaultRoutes();
   return {
     ...state,
     pendingImportProjectId: null,
@@ -3779,12 +3859,12 @@ function renderOutline() {
       (chapter) => `
         <tr>
           <td>${chapter.id}</td>
-          <td>${chapter.title}</td>
+          <td title="${escapeHtml(chapter.title)}">${escapeHtml(chapter.title)}</td>
           <td>${chapter.roughOutline?.chapter || "-"}</td>
           <td>${outlineSummary(chapter.detailedOutline)}</td>
           <td>
             <span class="status ${statusClass(chapter.status)}">${chapter.status}</span>
-            ${project.chapters.length ? `<button type="button" class="mini-button" data-edit-chapter-outline="${chapter.id}">编辑</button>` : ""}
+            ${project.chapters.length ? `<button type="button" class="mini-button" data-edit-chapter-title="${chapter.id}">改名</button><button type="button" class="mini-button" data-edit-chapter-outline="${chapter.id}">编辑</button>` : ""}
           </td>
         </tr>
       `,
@@ -3991,6 +4071,9 @@ function editorMetaHtml(project, chapter) {
   const targetWords = activeTargetWords(project, chapter);
   const modelMeta = chapterModelMeta(chapter);
   const progressSummary = chapterProgressSummary(updateChapterProgressState(project, chapter));
+  const titleMeta = chapter.titleLlmMeta?.source === "api"
+    ? `<span class="meta-ok">标题模型：${chapter.titleLlmMeta.provider} / ${chapter.titleLlmMeta.model}</span>`
+    : "";
   return `
     <span>目标 ${targetWords} 字</span>
     <span>当前 ${chapterWordCount(chapter.manuscript || "")} 字</span>
@@ -4001,6 +4084,7 @@ function editorMetaHtml(project, chapter) {
     <span>状态：${chapter.status}</span>
     <span class="${chapter.manualStyleEdited ? "meta-warn" : ""}">人工文风：${chapter.styleRevisionStatus || "未修改"}</span>
     <span class="${modelMeta.className}">${modelMeta.text}</span>
+    ${titleMeta}
   `;
 }
 
@@ -4012,6 +4096,7 @@ function selectChapter(id) {
 
   if (!chapter) {
     $("#writer-title").textContent = "等待章节计划";
+    $("#chapter-title-input").value = "";
     $("#editor-meta").textContent = "导入大纲并拆章后开始写作。";
     $("#manuscript").value = "";
     $("#chapter-outline").textContent = "暂无本章大纲。";
@@ -4032,6 +4117,7 @@ function selectChapter(id) {
   }
 
   $("#writer-title").textContent = `第 ${chapter.id} 章 ${chapter.title}`;
+  $("#chapter-title-input").value = chapter.title || "";
   const continuity = refreshProjectStoryMemory(project, chapter);
   $("#editor-meta").innerHTML = editorMetaHtml(project, chapter);
   $("#manuscript").value = chapter.manuscript;
@@ -4083,6 +4169,101 @@ function renderChapterScore(chapter) {
     + (chapter.reviewPassed
       ? `<p class="score-notes">${chapter.status === "完成" ? "审查通过，当前章节已完成。" : "审查通过，可以标记完成。"}</p>`
       : "");
+}
+
+function applyChapterTitle(project, chapter, rawTitle, { source = "manual", modelResult = null } = {}) {
+  if (!project || !chapter) return false;
+  const nextTitle = normalizeChapterTitle(rawTitle, chapter);
+  const previousTitle = chapter.title || "";
+  if (!nextTitle || nextTitle === previousTitle) {
+    $("#chapter-title-input").value = previousTitle;
+    return false;
+  }
+  createChapterVersionSnapshot(project, chapter, "改名前快照", { reason: "before-title-change", previousTitle, nextTitle });
+  chapter.title = nextTitle;
+  if (chapter.detailedOutline && !Array.isArray(chapter.detailedOutline)) {
+    chapter.detailedOutline.chapterTitle = nextTitle;
+  }
+  chapter.titleUpdatedAt = new Date().toISOString();
+  chapter.titleSource = source;
+  if (modelResult) {
+    recordTitleLlmUsage(project, chapter, modelResult, previousTitle, nextTitle);
+  } else {
+    chapter.titleHistory = (chapter.titleHistory || []).concat({
+      at: chapter.titleUpdatedAt,
+      source,
+      previousTitle,
+      nextTitle,
+    }).slice(-20);
+  }
+  refreshChapterStorySnapshot(project, chapter);
+  refreshChapterFactCache(project, chapter);
+  applyContinuityGate(project, chapter);
+  project.chapterTitleUpdatedAt = chapter.titleUpdatedAt;
+  return true;
+}
+
+function saveCurrentChapterTitle() {
+  const project = currentProject();
+  const chapter = selectedChapter();
+  if (!chapter) return;
+  const input = $("#chapter-title-input");
+  const changed = applyChapterTitle(project, chapter, input?.value || "", { source: "manual" });
+  if (!changed) {
+    showToast("章节名没有变化。");
+    return;
+  }
+  renderOutline();
+  renderChapters(chapter.id);
+  selectChapter(chapter.id);
+  saveStateSoon("save-chapter-title");
+  scheduleProductionSync("save-chapter-title");
+  showToast(`第 ${chapter.id} 章章名已保存。`);
+}
+
+async function generateCurrentChapterTitle() {
+  const project = currentProject();
+  const chapter = selectedChapter();
+  if (!chapter) return;
+  const text = cleanGeneratedDraft($("#manuscript").value || chapter.manuscript || "");
+  if (chapterWordCount(text) < 120) {
+    showToast("正文太短，先写正文再按正文取名。");
+    return;
+  }
+  if (text !== chapter.manuscript) {
+    chapter.manuscript = text;
+    chapter.wordCount = chapterWordCount(text);
+    refreshChapterStorySnapshot(project, chapter);
+    refreshChapterFactCache(project, chapter);
+  }
+  const button = $("#generate-chapter-title");
+  const previousText = button?.textContent || "按正文取名";
+  if (button) {
+    button.disabled = true;
+    button.textContent = "取名中";
+  }
+  const route = routeForTask("章节标题");
+  try {
+    const prompt = buildChapterTitlePrompt(project, chapter);
+    const result = await callChapterModel(project, chapter, prompt, 64, "章节标题");
+    const title = normalizeChapterTitle(result.text, chapter);
+    const changed = applyChapterTitle(project, chapter, title, { source: "api", modelResult: result });
+    renderOutline();
+    renderChapters(chapter.id);
+    selectChapter(chapter.id);
+    saveStateSoon("generate-chapter-title");
+    scheduleProductionSync("generate-chapter-title");
+    showToast(changed
+      ? `已用 ${result.provider || route?.provider || "模型"} 生成章名：${title}`
+      : `模型给出的章名与当前一致：${title}`);
+  } catch (error) {
+    showToast(`章节取名失败：${error.message || "模型调用失败"}`);
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.textContent = previousText;
+    }
+  }
 }
 
 function updateWorkflowButtons(chapter) {
@@ -4880,6 +5061,7 @@ async function runProductionEditorAgent() {
 }
 
 function renderAll() {
+  ensureDefaultRoutes();
   state.projects.forEach((project) => {
     ensureProjectPlanning(project);
     sortChaptersById(project.chapters || []).forEach((chapter) => {
@@ -6547,6 +6729,8 @@ Object.assign(window, {
   completeCurrentChapter,
   saveCurrentManuscript,
   saveCurrentDetailOutline,
+  saveCurrentChapterTitle,
+  generateCurrentChapterTitle,
 });
 
 function runWriterCommand(commandName) {
@@ -6557,6 +6741,8 @@ function runWriterCommand(commandName) {
     "auto-fix-chapter": autoFixCurrentChapter,
     "complete-chapter": completeCurrentChapter,
     "save-manuscript": saveCurrentManuscript,
+    "save-chapter-title": saveCurrentChapterTitle,
+    "generate-chapter-title": generateCurrentChapterTitle,
   };
   const result = actions[commandName]?.();
   if (result?.catch) {
@@ -6640,6 +6826,13 @@ function bindEvents() {
     $("#save-outline-nodes")?.classList.add("dirty");
   });
   $("#chapter-directory-table").addEventListener("click", (event) => {
+    const titleButton = event.target.closest("[data-edit-chapter-title]");
+    if (titleButton) {
+      selectChapter(Number(titleButton.dataset.editChapterTitle));
+      switchPage("writer");
+      window.setTimeout(() => $("#chapter-title-input")?.focus(), 0);
+      return;
+    }
     const button = event.target.closest("[data-edit-chapter-outline]");
     if (!button) return;
     editChapterOutlineFromDirectory(button.dataset.editChapterOutline);
@@ -6678,6 +6871,13 @@ function bindEvents() {
   });
 
   $("#manuscript").addEventListener("input", () => syncCurrentManuscript());
+  $("#chapter-title-input").addEventListener("keydown", (event) => {
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    saveCurrentChapterTitle();
+  });
+  $("#save-chapter-title").addEventListener("click", () => saveCurrentChapterTitle());
+  $("#generate-chapter-title").addEventListener("click", () => generateCurrentChapterTitle());
   $("#chapter-detail-outline").addEventListener("input", () => markDetailOutlineDirty(true));
   $("#save-detail-outline").addEventListener("click", () => saveCurrentDetailOutline());
   $("#save-chapter-version").addEventListener("click", () => saveCurrentChapterVersion());

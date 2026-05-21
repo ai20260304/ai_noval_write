@@ -461,9 +461,14 @@
 
             <section class="editor-panel">
               <div class="editor-head">
-                <div>
+                <div class="editor-title-box">
                   <p class="eyebrow">章节写作台</p>
                   <h1 id="writer-title">章节写作</h1>
+                  <div class="chapter-title-edit">
+                    <input id="chapter-title-input" type="text" maxlength="32" placeholder="章节名" autocomplete="off" />
+                    <button class="mini-button" id="save-chapter-title" type="button">保存章名</button>
+                    <button class="mini-button" id="generate-chapter-title" type="button">按正文取名</button>
+                  </div>
                 </div>
                 <div class="inline-tools">
                   <button class="ghost-button" id="save-manuscript" data-command="save-manuscript">
