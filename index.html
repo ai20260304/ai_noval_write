@@ -409,6 +409,9 @@
               <button class="ghost-button" id="detail-outline-open-writer" type="button">
                 <i data-lucide="pen-line"></i><span>打开写作台</span>
               </button>
+              <button class="ghost-button" id="deai-detail-outline-center" type="button">
+                <i data-lucide="wand-sparkles"></i><span>细纲去 AI 味</span>
+              </button>
               <button class="primary-button small" id="save-detail-outline-center" type="button">
                 <i data-lucide="save"></i><span>保存细纲</span>
               </button>
@@ -438,6 +441,19 @@
               <div class="detail-center-rough">
                 <h3>本章粗纲</h3>
                 <p id="detail-outline-center-rough">暂无本章粗纲。</p>
+              </div>
+              <div class="selection-rewrite-progress detail-outline-rewrite-progress" hidden>
+                <div class="selection-rewrite-progress-top">
+                  <strong data-detail-outline-rewrite-title>等待细纲改写</strong>
+                  <span data-detail-outline-rewrite-percent>0%</span>
+                </div>
+                <div class="selection-rewrite-progress-track">
+                  <span data-detail-outline-rewrite-bar></span>
+                </div>
+                <div class="selection-rewrite-progress-detail">
+                  <span data-detail-outline-rewrite-detail>尚未调用模型</span>
+                  <span data-detail-outline-rewrite-elapsed>0 秒</span>
+                </div>
               </div>
               <div class="detail-outline detail-outline-center-editor" id="detail-outline-center-editor"></div>
             </section>
@@ -612,7 +628,25 @@
               <div class="context-block detail-outline-block">
                 <div class="context-title-row">
                   <h3>本章细纲</h3>
-                  <button class="mini-button" id="save-detail-outline" type="button">保存细纲</button>
+                  <div class="inline-tools tight-tools">
+                    <button class="mini-button" id="deai-detail-outline" type="button">
+                      <i data-lucide="wand-sparkles"></i><span>细纲去 AI 味</span>
+                    </button>
+                    <button class="mini-button" id="save-detail-outline" type="button">保存细纲</button>
+                  </div>
+                </div>
+                <div class="selection-rewrite-progress detail-outline-rewrite-progress" hidden>
+                  <div class="selection-rewrite-progress-top">
+                    <strong data-detail-outline-rewrite-title>等待细纲改写</strong>
+                    <span data-detail-outline-rewrite-percent>0%</span>
+                  </div>
+                  <div class="selection-rewrite-progress-track">
+                    <span data-detail-outline-rewrite-bar></span>
+                  </div>
+                  <div class="selection-rewrite-progress-detail">
+                    <span data-detail-outline-rewrite-detail>尚未调用模型</span>
+                    <span data-detail-outline-rewrite-elapsed>0 秒</span>
+                  </div>
                 </div>
                 <div class="detail-outline" id="chapter-detail-outline"></div>
               </div>

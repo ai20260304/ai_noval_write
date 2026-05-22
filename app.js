@@ -179,6 +179,7 @@ const state = {
     { task: "完稿评分", provider: "GPT / OpenAI", model: "gpt-5.2", temperature: "0.1", usage: "剧情、文风、爽点评分" },
     { task: "章节标题", provider: "DeepSeek", model: "deepseek-chat", temperature: "0.35", usage: "根据正文生成短章名" },
     { task: "片段改写", provider: "DeepSeek", model: "deepseek-chat", temperature: "0.45", usage: "按选区和要求精确改写正文片段" },
+    { task: "细纲去 AI 味", provider: "DeepSeek", model: "deepseek-chat", temperature: "0.35", usage: "把细纲改成故事拍点，删说明腔和模板腔" },
     { task: "一致性审查", provider: "自定义供应商", model: "gpt-5.5", temperature: "0.1", usage: "长上下文事实校验" },
     { task: "公开资料补强", provider: "自定义供应商", model: "gpt-5.5", temperature: "0.2", usage: "联网资料摘要与故事路线补强" },
     { task: "尺度红线审查", provider: "Claude / Anthropic", model: "claude-sonnet-4.5", temperature: "0", usage: "暧昧、亲密、未成年和平台风险审查" },
@@ -324,6 +325,10 @@ function ensureStyleControls(project) {
   if (!Array.isArray(project.deepseekDeAiPromptLibrary) || project.deepseekDeAiPromptLibraryVersion !== "deepseek-deai-v1") {
     project.deepseekDeAiPromptLibrary = DEEPSEEK_DE_AI_PROMPT_LIBRARY.map((item) => ({ ...item }));
     project.deepseekDeAiPromptLibraryVersion = "deepseek-deai-v1";
+  }
+  if (!Array.isArray(project.detailOutlineDeAiRules) || project.detailOutlineDeAiRulesVersion !== DETAIL_OUTLINE_DE_AI_RULES_VERSION) {
+    project.detailOutlineDeAiRules = [...DETAIL_OUTLINE_DE_AI_RULES];
+    project.detailOutlineDeAiRulesVersion = DETAIL_OUTLINE_DE_AI_RULES_VERSION;
   }
   if (isEntertainmentProject(project)) {
     if (!Array.isArray(project.entertainmentStyleLibrary) || project.entertainmentStyleLibraryVersion !== ENTERTAINMENT_STYLE_LIBRARY_VERSION) {
@@ -1971,6 +1976,7 @@ function ensureDefaultRoutes() {
   [
     ["章节标题", "0.35", "根据正文生成短章名"],
     ["片段改写", "0.45", "按选区和要求精确改写正文片段"],
+    ["细纲去 AI 味", "0.35", "把细纲改成故事拍点，删说明腔和模板腔"],
   ].forEach(([task, temperature, usage]) => {
     if (state.routes.some((route) => route.task === task)) return;
     state.routes.push({
@@ -2021,6 +2027,13 @@ const selectionRewriteState = {
   text: "",
   sourcePreview: "",
   result: "",
+  running: false,
+  progressTimer: null,
+  progressStartedAt: 0,
+  progressValue: 0,
+};
+
+const detailOutlineRewriteState = {
   running: false,
   progressTimer: null,
   progressStartedAt: 0,
@@ -2202,6 +2215,209 @@ function recordSelectionRewriteMemory(project, chapter, before, after, instructi
   project.selectionRewriteUpdatedAt = now;
   project.learnedRules = (project.learnedRules || []).concat(`选区改写偏好：遇到类似“${compactMemoryText(before, 46)}”的问题，按“${compactMemoryText(after, 70)}”的方式处理；要求：${instruction || "去 AI 味，保留事实，强化人物选择。"}`).slice(-80);
   chapter.selectionRewriteHistory = (chapter.selectionRewriteHistory || []).concat(memory).slice(-20);
+}
+
+function setDetailOutlineRewriteButtons(running = false) {
+  ["#deai-detail-outline", "#deai-detail-outline-center"].forEach((selector) => {
+    const button = $(selector);
+    if (!button) return;
+    button.disabled = running;
+    button.classList.toggle("is-running", running);
+    const label = $("span", button);
+    if (label) label.textContent = running ? "改写中" : "细纲去 AI 味";
+  });
+}
+
+function setDetailOutlineRewriteProgress(percent, title, detail, { running = true, failed = false } = {}) {
+  detailOutlineRewriteState.progressValue = Math.max(0, Math.min(100, Math.round(percent)));
+  $$(".detail-outline-rewrite-progress").forEach((box) => {
+    box.hidden = false;
+    box.classList.toggle("running", running && !failed);
+    box.classList.toggle("failed", failed);
+    const titleNode = $("[data-detail-outline-rewrite-title]", box);
+    const percentNode = $("[data-detail-outline-rewrite-percent]", box);
+    const barNode = $("[data-detail-outline-rewrite-bar]", box);
+    const detailNode = $("[data-detail-outline-rewrite-detail]", box);
+    const elapsedNode = $("[data-detail-outline-rewrite-elapsed]", box);
+    if (titleNode) titleNode.textContent = title;
+    if (percentNode) percentNode.textContent = `${detailOutlineRewriteState.progressValue}%`;
+    if (barNode) barNode.style.width = `${detailOutlineRewriteState.progressValue}%`;
+    if (detailNode) detailNode.textContent = detail;
+    if (detailOutlineRewriteState.progressStartedAt) {
+      if (elapsedNode) elapsedNode.textContent = formatElapsed(Date.now() - detailOutlineRewriteState.progressStartedAt);
+    }
+  });
+}
+
+function startDetailOutlineRewriteProgress(route, chapter) {
+  window.clearInterval(detailOutlineRewriteState.progressTimer);
+  detailOutlineRewriteState.running = true;
+  detailOutlineRewriteState.progressStartedAt = Date.now();
+  detailOutlineRewriteState.progressValue = 5;
+  const modelText = route ? `${route.provider} / ${route.model}` : "按细纲去 AI 味路由选择模型";
+  setDetailOutlineRewriteProgress(5, "准备细纲改写", `第 ${chapter.id} 章，模型 ${modelText}`);
+  detailOutlineRewriteState.progressTimer = window.setInterval(() => {
+    const elapsed = Date.now() - detailOutlineRewriteState.progressStartedAt;
+    const ceiling = elapsed > 45000 ? 90 : elapsed > 20000 ? 84 : 76;
+    const next = Math.min(ceiling, detailOutlineRewriteState.progressValue + (elapsed > 30000 ? 1 : 3));
+    setDetailOutlineRewriteProgress(next, "等待模型返回", `正在把细纲改成故事拍点，已等待 ${formatElapsed(elapsed)}。`);
+  }, 2500);
+}
+
+function finishDetailOutlineRewriteProgress(message = "细纲已改写并保存") {
+  window.clearInterval(detailOutlineRewriteState.progressTimer);
+  detailOutlineRewriteState.progressTimer = null;
+  detailOutlineRewriteState.running = false;
+  setDetailOutlineRewriteProgress(100, "细纲去 AI 味完成", message, { running: false });
+}
+
+function failDetailOutlineRewriteProgress(message = "细纲去 AI 味失败") {
+  window.clearInterval(detailOutlineRewriteState.progressTimer);
+  detailOutlineRewriteState.progressTimer = null;
+  detailOutlineRewriteState.running = false;
+  setDetailOutlineRewriteProgress(Math.max(detailOutlineRewriteState.progressValue, 100), "细纲去 AI 味失败", message, { running: false, failed: true });
+}
+
+function detailOutlineToPromptJson(detail) {
+  if (Array.isArray(detail)) {
+    return {
+      version: CURRENT_DETAIL_OUTLINE_VERSION,
+      core: detail.join(" / "),
+      scenes: detail.map((content, index) => ({
+        title: `场景${index + 1}`,
+        words: 500,
+        content,
+        systemLines: [],
+      })),
+      requirements: [],
+      hook: detail.at(-1) || "",
+    };
+  }
+  return detail || {};
+}
+
+function buildDetailOutlineDeAiPrompt(project, chapter, detail) {
+  const previous = previousChapterFor(project, chapter.id);
+  const next = nextChapterFor(project, chapter.id);
+  const previousEnding = previous ? chapterEndingMemory(previous) : "";
+  const rules = project.detailOutlineDeAiRules?.length ? project.detailOutlineDeAiRules : DETAIL_OUTLINE_DE_AI_RULES;
+  return [
+    `你是中文商业网文细纲编辑。只改写《${project.title}》第 ${chapter.id} 章《${chapter.title || "未命名"}》的细纲，不写正文。`,
+    "目标：把细纲改成真人作者会用的故事拍点，去掉 AI 味、说明腔、模板腔和工作台提示。",
+    "必须只输出 JSON 对象，不输出 Markdown、解释、标题、代码块或额外文字。",
+    "JSON 字段必须包含：version、chapterTitle、time、place、core、sourceNode、phase、opening、powerFocus、scenes、roles、clues、requirements、hook。",
+    "scenes 必须是数组，每项包含 title、words、content、systemLines。content 写本场发生了什么，不写写法说明。",
+    "保留原细纲事实、粗纲节点、人物认知、数值、金额、时间线和伏笔。禁止新增胎记、私密身体特征、家庭秘密、亲密桥段、未铺垫人物或未来章节信息。",
+    "如果原细纲有系统面板/金手指数值，只能校准表达，不能改数值含义；星运/幸运值必须保持 0-100 合法范围。",
+    "",
+    "【细纲去 AI 味规则】",
+    ...rules,
+    "",
+    "【项目文风规则】",
+    ...(combinedGenerationRules(project).slice(0, 14)),
+    "",
+    "【上一章结尾】",
+    previousEnding || "无",
+    "",
+    "【本章粗纲】",
+    [
+      chapter.roughOutline?.chapter ? `粗纲节点：${chapter.roughOutline.chapter}` : "",
+      chapter.roughOutline?.target ? `目标：${chapter.roughOutline.target}` : "",
+      chapter.roughOutline?.event ? `事件：${chapter.roughOutline.event}` : chapter.outline || "",
+      chapter.roughOutline?.clue ? `伏笔：${chapter.roughOutline.clue}` : "",
+    ].filter(Boolean).join("；") || chapter.outline || "无",
+    "",
+    "【下一章提示】",
+    next ? `第 ${next.id} 章：${next.title || ""}｜${next.outline || ""}` : "无",
+    "",
+    "【原细纲 JSON】",
+    JSON.stringify(detailOutlineToPromptJson(detail), null, 2),
+  ].filter(Boolean).join("\n");
+}
+
+function cleanDetailOutlineRewriteResponse(text = "") {
+  return String(text || "")
+    .replace(/^\uFEFF/, "")
+    .replace(/^```(?:json)?\s*/i, "")
+    .replace(/```\s*$/i, "")
+    .trim();
+}
+
+function parseDetailOutlineRewriteJson(text = "") {
+  const cleaned = cleanDetailOutlineRewriteResponse(text);
+  const candidates = [
+    cleaned,
+    cleaned.slice(cleaned.indexOf("{"), cleaned.lastIndexOf("}") + 1),
+  ].filter((item) => item && item.trim().startsWith("{") && item.trim().endsWith("}"));
+  for (const candidate of candidates) {
+    try {
+      const parsed = JSON.parse(candidate);
+      return parsed.detailedOutline || parsed.detail || parsed;
+    } catch {
+      // Try the next candidate.
+    }
+  }
+  throw new Error("模型没有返回有效细纲 JSON");
+}
+
+function normalizeRewrittenDetailedOutline(raw, fallback = {}, chapter = null) {
+  const fallbackObject = detailOutlineToPromptJson(fallback);
+  const source = raw && typeof raw === "object" ? raw : {};
+  const arrayFrom = (value, fallbackValue = []) => {
+    if (Array.isArray(value)) return value.map((item) => String(item || "").trim()).filter(Boolean);
+    if (typeof value === "string") return value.split(/\n+/).map((item) => item.trim()).filter(Boolean);
+    return Array.isArray(fallbackValue) ? fallbackValue : [];
+  };
+  const scenes = (Array.isArray(source.scenes) && source.scenes.length ? source.scenes : fallbackObject.scenes || [])
+    .slice(0, 8)
+    .map((scene, index) => ({
+      title: String(scene?.title || `场景${index + 1}`).trim(),
+      words: Math.max(100, Number(scene?.words || 500)),
+      content: String(scene?.content || scene?.detail || "").trim(),
+      systemLines: arrayFrom(scene?.systemLines, []),
+    }))
+    .filter((scene) => scene.content || scene.title);
+  return {
+    ...fallbackObject,
+    ...source,
+    version: CURRENT_DETAIL_OUTLINE_VERSION,
+    chapterTitle: String(source.chapterTitle || fallbackObject.chapterTitle || chapter?.title || "").trim(),
+    time: String(source.time || fallbackObject.time || "").trim(),
+    place: String(source.place || fallbackObject.place || "").trim(),
+    core: String(source.core || fallbackObject.core || chapter?.outline || "").trim(),
+    sourceNode: String(source.sourceNode || fallbackObject.sourceNode || chapter?.roughOutline?.chapter || "").trim(),
+    phase: String(source.phase || fallbackObject.phase || "").trim(),
+    opening: String(source.opening || fallbackObject.opening || "").trim(),
+    powerFocus: String(source.powerFocus || fallbackObject.powerFocus || goldFingerPowerNames().join(" / ")).trim(),
+    scenes,
+    roles: arrayFrom(source.roles, fallbackObject.roles || chapter?.roles || []),
+    clues: arrayFrom(source.clues, fallbackObject.clues || chapter?.clues || []),
+    requirements: arrayFrom(source.requirements, fallbackObject.requirements || []),
+    hook: String(source.hook || fallbackObject.hook || "").trim(),
+    deAiEditedAt: new Date().toISOString(),
+  };
+}
+
+function appendDetailOutlineDeAiMemory(project, chapter, beforeDetail, afterDetail, result, source) {
+  const now = new Date().toISOString();
+  const record = {
+    at: now,
+    source,
+    provider: result.provider,
+    model: result.model,
+    before: detailOutlineSummaryText(beforeDetail),
+    after: detailOutlineSummaryText(afterDetail),
+  };
+  chapter.detailOutlineDeAiAt = now;
+  chapter.detailOutlineDeAiHistory = (chapter.detailOutlineDeAiHistory || []).concat(record).slice(-20);
+  project.detailOutlineDeAiLogs = (project.detailOutlineDeAiLogs || []).concat({
+    chapter: chapter.id,
+    title: chapter.title,
+    ...record,
+    usage: result.usage || {},
+  }).slice(-50);
+  const rule = "细纲去AI味：细纲只写故事拍点，每场必须有目标、阻碍、行动、结果/代价和下一步压力，不写工作台说明。";
+  project.learnedRules = Array.from(new Set([...(project.learnedRules || []), rule])).slice(-80);
 }
 
 function chapterModelMeta(chapter = {}) {
@@ -2635,6 +2851,16 @@ const ENTERTAINMENT_PATTERNS = [
   { title: "舆论多视角", detail: "营销号、粉丝群、路人弹幕、狗仔偷拍视频、经纪人会议交替推进，避免单线解释。" },
   { title: "行业时间钉", detail: "用真实行业节点做锚点：选秀年、流量时代、短视频宣发、电影节、平台剧招商，不完全架空。" },
   { title: "爽点后果", detail: "每次打脸都要带来资源、口碑、关系或敌人升级，不能只写全网震惊。" },
+];
+
+const DETAIL_OUTLINE_DE_AI_RULES_VERSION = "detail-outline-deai-v1";
+const DETAIL_OUTLINE_DE_AI_RULES = [
+  "细纲只写故事拍点，不写“本章定位、剧情目标、写法要求、冲突设计”这类工作台说明。",
+  "每个场景必须落到：谁想要什么、谁挡住、人物怎么做、结果/代价是什么、下一步压力在哪里。",
+  "删除 AI 味句式：仿佛、似乎、莫名、复杂情绪、命运齿轮、空气凝固、他不知道的是、事情没那么简单。",
+  "不要用场景物品清单凑细纲；地点和物件只保留会改变人物选择或触发冲突的 1-2 个。",
+  "保留粗纲事实、角色认知、数值、金额、时间线和伏笔，不新增胎记、秘密、亲密桥段或未铺垫设定。",
+  "章末钩子必须是下一章会立刻处理的麻烦、证据、电话、人物入场或代价，不写空泛预告。",
 ];
 
 const ENTERTAINMENT_STYLE_LIBRARY_VERSION = "entertainment-style-v1";
@@ -3804,6 +4030,8 @@ function buildImportedProject(text, sourceName = "") {
     storyRoutes: entertainmentPreset ? STORY_ROUTE_LIBRARY : [],
     deepseekDeAiPromptLibrary: DEEPSEEK_DE_AI_PROMPT_LIBRARY.map((item) => ({ ...item })),
     deepseekDeAiPromptLibraryVersion: "deepseek-deai-v1",
+    detailOutlineDeAiRules: [...DETAIL_OUTLINE_DE_AI_RULES],
+    detailOutlineDeAiRulesVersion: DETAIL_OUTLINE_DE_AI_RULES_VERSION,
     entertainmentStyleLibrary: entertainmentPreset ? ENTERTAINMENT_STYLE_LIBRARY.map((item) => ({ ...item })) : [],
     entertainmentStyleLibraryVersion: entertainmentPreset ? ENTERTAINMENT_STYLE_LIBRARY_VERSION : "",
     entertainmentMemeLibrary: entertainmentPreset ? ENTERTAINMENT_VIRAL_MEME_LIBRARY.map((item) => ({ ...item })) : [],
@@ -4113,6 +4341,82 @@ async function saveCurrentDetailOutline() {
   await saveStateNowWithMessage("save-detail-outline", `第 ${chapter.id} 章细纲已保存。`);
 }
 
+async function deAiCurrentDetailOutline(source = "writer") {
+  const project = currentProject();
+  ensureStyleControls(project);
+  const chapter = selectedChapter();
+  if (!chapter) {
+    showToast("当前没有可改写的章节细纲。");
+    return;
+  }
+  if (detailOutlineRewriteState.running) {
+    showToast("细纲正在去 AI 味，请等当前任务完成。");
+    return;
+  }
+
+  const root = source === "center" ? "#detail-outline-center-editor" : "#chapter-detail-outline";
+  const currentDetail = collectDetailedOutlineFromEditor(chapter.detailedOutline, root);
+  const promptSource = detailOutlineToPromptJson(currentDetail);
+  const hasOutlineContent = [
+    promptSource.core,
+    promptSource.opening,
+    promptSource.hook,
+    ...(promptSource.scenes || []).flatMap((scene) => [scene.title, scene.content]),
+  ].some((item) => String(item || "").trim());
+  if (!hasOutlineContent) {
+    showToast("当前章节细纲为空，先生成或填写细纲。");
+    return;
+  }
+
+  const taskName = "细纲去 AI 味";
+  const route = routeForTask(taskName);
+  const startedAt = new Date().toISOString();
+  chapter.detailedOutline = currentDetail;
+  if (!Array.isArray(chapter.detailedOutline)) {
+    chapter.outline = chapter.detailedOutline.core || chapter.outline;
+    chapter.generationPrompt = buildChapterGenerationPrompt(project, chapter, chapter.detailedOutline);
+    chapter.generationContract = buildChapterGenerationContract(project, chapter);
+  }
+  createChapterVersionSnapshot(project, chapter, "细纲去AI前快照", { reason: "before-detail-outline-deai", source });
+  chapter.detailOutlineDeAiPrompt = buildDetailOutlineDeAiPrompt(project, chapter, currentDetail);
+  chapter.detailOutlineDeAiStartedAt = startedAt;
+  setDetailOutlineRewriteButtons(true);
+  startDetailOutlineRewriteProgress(route, chapter);
+  showToast(route ? `正在调用 ${route.provider} / ${route.model} 改写细纲...` : "正在调用模型改写细纲...");
+
+  try {
+    setDetailOutlineRewriteProgress(18, "整理细纲上下文", "已读取粗纲、上一章尾声、下一章提示和项目文风规则。");
+    await new Promise((resolve) => window.setTimeout(resolve, 80));
+    setDetailOutlineRewriteProgress(36, "发送模型请求", route ? `已向 ${route.provider} / ${route.model} 发送细纲去 AI 味请求。` : "已向细纲改写模型发送请求。");
+    const result = await callChapterModel(project, chapter, chapter.detailOutlineDeAiPrompt, 1400, taskName);
+    setDetailOutlineRewriteProgress(82, "模型已返回", "正在解析 JSON、校验字段并同步到写作台。");
+    const parsed = parseDetailOutlineRewriteJson(result.text);
+    const nextDetail = normalizeRewrittenDetailedOutline(parsed, currentDetail, chapter);
+    if (!nextDetail.scenes?.length || !nextDetail.core) {
+      throw new Error("模型返回的细纲缺少核心或场景");
+    }
+
+    recordAuxiliaryLlmUsage(project, chapter, { ...result, task: taskName }, "detailOutlineRewriteLlmMeta", "detailOutlineRewriteLogs");
+    applyDetailedOutlineEdit(project, chapter, nextDetail, { source: source === "center" ? "detail-outline-deai-center" : "detail-outline-deai" });
+    appendDetailOutlineDeAiMemory(project, chapter, currentDetail, nextDetail, result, source);
+    markDetailOutlineDirty(false);
+    markDetailOutlineDirty(false, "center");
+    refreshDetailOutlineViews(project, chapter);
+    scheduleProductionSync("detail-outline-deai");
+    await saveStateNowWithMessage("detail-outline-deai", `第 ${chapter.id} 章细纲已完成去 AI 味，并同步到章节写作台。`);
+    finishDetailOutlineRewriteProgress(`已调用 ${result.provider || route?.provider || "模型"} / ${result.model || route?.model || "-"}，细纲已保存。`);
+    showToast(`第 ${chapter.id} 章细纲去 AI 味完成。`);
+  } catch (error) {
+    const message = error.message || "细纲去 AI 味失败";
+    chapter.detailOutlineDeAiError = message;
+    failDetailOutlineRewriteProgress(message);
+    saveStateSoon("detail-outline-deai-failed");
+    showToast(`细纲去 AI 味失败：${message}`);
+  } finally {
+    setDetailOutlineRewriteButtons(false);
+  }
+}
+
 function collectOutlineRowsFromDom() {
   const currentRows = currentProject().outlineRows || [];
   return $$("#outline-table [data-outline-row]").map((node, index) => {
@@ -4220,7 +4524,7 @@ function renderDetailOutlineCenter() {
         : rangeNote + windowed.items.map((chapter) => `
           <button class="detail-center-item ${Number(chapter.id) === Number(state.activeChapterId) ? "active" : ""}" data-detail-outline-chapter="${chapter.id}" type="button">
             <strong>第 ${chapter.id} 章 ${escapeHtml(chapter.title || "未命名")}</strong>
-            <span>${escapeHtml(chapter.roughOutline?.chapter || "-")} · ${escapeHtml(chapter.status || "待写")} · ${chapter.detailOutlineEditedAt ? "已人工编辑" : "自动细纲"}</span>
+            <span>${escapeHtml(chapter.roughOutline?.chapter || "-")} · ${escapeHtml(chapter.status || "待写")} · ${chapter.detailOutlineDeAiAt ? "已去AI" : chapter.detailOutlineEditedAt ? "已人工编辑" : "自动细纲"}</span>
             <em>${escapeHtml(detailOutlineSummaryText(chapter.detailedOutline))}</em>
           </button>
         `).join("");
@@ -4245,7 +4549,8 @@ function renderDetailOutlineCenter() {
       `状态：${selected.status || "待写"}`,
       `目标：${activeTargetWords(project, selected)} 字`,
       selected.detailOutlineEditedAt ? `细纲保存：${new Date(selected.detailOutlineEditedAt).toLocaleString("zh-CN", { hour12: false })}` : "细纲尚未人工保存",
-    ].join(" · ");
+      selected.detailOutlineDeAiAt ? `去AI：${new Date(selected.detailOutlineDeAiAt).toLocaleString("zh-CN", { hour12: false })}` : "",
+    ].filter(Boolean).join(" · ");
   }
   if (rough) {
     rough.textContent = [
@@ -4735,6 +5040,9 @@ function editorMetaHtml(project, chapter) {
   const rewriteMeta = chapter.selectionRewriteLlmMeta?.source === "api"
     ? `<span class="meta-ok">片段模型：${chapter.selectionRewriteLlmMeta.provider} / ${chapter.selectionRewriteLlmMeta.model}</span>`
     : "";
+  const detailOutlineMeta = chapter.detailOutlineRewriteLlmMeta?.source === "api"
+    ? `<span class="meta-ok">细纲模型：${chapter.detailOutlineRewriteLlmMeta.provider} / ${chapter.detailOutlineRewriteLlmMeta.model}</span>`
+    : "";
   return `
     <span>目标 ${targetWords} 字</span>
     <span>当前 ${chapterWordCount(chapter.manuscript || "")} 字</span>
@@ -4747,6 +5055,7 @@ function editorMetaHtml(project, chapter) {
     <span class="${modelMeta.className}">${modelMeta.text}</span>
     ${titleMeta}
     ${rewriteMeta}
+    ${detailOutlineMeta}
   `;
 }
 
@@ -5255,6 +5564,7 @@ function renderSkills() {
     { name: "娱乐圈爽文", task: "题材模板", desc: "舆论反转、资源压制、热搜节点和粉丝反馈。", active: isEntertainmentProject(project) },
     { name: "联网文风与爆梗库", task: "章节正文 / 改写", desc: "把年度热梗做成弹幕、评论、热搜词条和综艺反馈，不把梗塞进旁白。", active: isEntertainmentProject(project) },
     { name: "可发表暧昧张力", task: "尺度审查", desc: "成年人、自愿、留白转场、写后果，不写露骨动作和身体细节。", active: isEntertainmentProject(project) },
+    { name: "细纲去 AI 味", task: "细纲中心 / 写作台", desc: "把说明式细纲改成目标、阻碍、行动、结果和章末压力清楚的故事拍点。", active: true },
     { name: "娱乐圈去 AI 味", task: "改写 / 评分", desc: "用通告单、品牌 brief、试镜、宣发群、后台监视器等具体物件替代模板腔。", active: true },
     { name: "DeepSeek 去 AI 味提示词", task: "章节正文 / 去 AI 改写", desc: "联网整理的分层提示：角色锁定、内部四步、解释腔硬删、事实保护。", active: true },
     { name: "一致性审查规则", task: "审查", desc: "检查角色轨迹、伏笔回收、时间线和物资数量。", active: true },
@@ -5949,6 +6259,8 @@ function createProject({ importOutline = false } = {}) {
     rawOutlineText: importOutline ? DEFAULT_OUTLINE_SAMPLE : "",
     forbiddenWords: [...ENTERTAINMENT_FORBIDDEN_WORDS],
     forbiddenWordsSeedVersion: FORBIDDEN_WORD_LIBRARY_VERSION,
+    detailOutlineDeAiRules: [...DETAIL_OUTLINE_DE_AI_RULES],
+    detailOutlineDeAiRulesVersion: DETAIL_OUTLINE_DE_AI_RULES_VERSION,
   };
 
   state.projects.unshift(newProject);
@@ -6027,6 +6339,8 @@ async function trainStyle() {
   const entertainmentPreset = isEntertainmentProject(project);
   project.styleProfile = buildStyleProfileFromAnalysis(analysis);
   project.learnedRules = buildLearnedRulesFromAnalysis(analysis, project);
+  project.detailOutlineDeAiRules = [...DETAIL_OUTLINE_DE_AI_RULES];
+  project.detailOutlineDeAiRulesVersion = DETAIL_OUTLINE_DE_AI_RULES_VERSION;
   if (entertainmentPreset) {
     project.researchNotes = ENTERTAINMENT_PATTERNS;
     project.romanceRules = PUBLISHABLE_ROMANCE_RULES;
@@ -7721,6 +8035,7 @@ function bindEvents() {
   });
   $("#detail-outline-center-editor").addEventListener("input", () => markDetailOutlineDirty(true, "center"));
   $("#save-detail-outline-center").addEventListener("click", () => saveDetailOutlineFromCenter());
+  $("#deai-detail-outline-center").addEventListener("click", () => deAiCurrentDetailOutline("center"));
   $("#detail-outline-open-writer").addEventListener("click", () => {
     selectChapter(state.activeChapterId);
     switchPage("writer");
@@ -7771,6 +8086,7 @@ function bindEvents() {
   $("#save-chapter-title").addEventListener("click", () => saveCurrentChapterTitle());
   $("#generate-chapter-title").addEventListener("click", () => generateCurrentChapterTitle());
   $("#chapter-detail-outline").addEventListener("input", () => markDetailOutlineDirty(true));
+  $("#deai-detail-outline").addEventListener("click", () => deAiCurrentDetailOutline("writer"));
   $("#save-detail-outline").addEventListener("click", () => saveCurrentDetailOutline());
   $("#save-chapter-version").addEventListener("click", () => saveCurrentChapterVersion());
   $("#chapter-version-list").addEventListener("click", (event) => {

@@ -220,6 +220,12 @@ select:focus-visible {
   gap: 8px;
 }
 
+.tight-tools {
+  gap: 6px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
 .search-box {
   display: flex;
   align-items: center;
