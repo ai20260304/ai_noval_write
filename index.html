@@ -747,6 +747,38 @@
               <div class="rule-grid" id="learned-rules"></div>
             </section>
 
+            <section class="panel style-rule-panel auto-web-learning-panel">
+              <div class="panel-head">
+                <div>
+                  <h2>联网自动学习</h2>
+                  <span class="muted" id="web-learning-status">未运行</span>
+                </div>
+                <label class="toggle-line">
+                  <input id="web-learning-enabled" type="checkbox" />
+                  <span>每日自动</span>
+                </label>
+              </div>
+              <div class="web-learning-form">
+                <label>
+                  <span>学习主题</span>
+                  <input id="web-learning-query" type="text" placeholder="娱乐圈爽文 文风 热搜 综艺 打脸" />
+                </label>
+                <label>
+                  <span>公开来源（一行一个：名称 | URL）</span>
+                  <textarea id="web-learning-sources" rows="5" placeholder="番茄娱乐圈题材页 | https://..."></textarea>
+                </label>
+                <div class="inline-tools">
+                  <button class="ghost-button" id="save-web-learning" type="button">
+                    <i data-lucide="save"></i><span>保存设置</span>
+                  </button>
+                  <button class="primary-button small" id="run-web-learning" type="button">
+                    <i data-lucide="globe-2"></i><span>立即学习</span>
+                  </button>
+                </div>
+              </div>
+              <div class="production-result-list web-learning-results" id="web-learning-results"></div>
+            </section>
+
             <section class="panel style-rule-panel">
               <div class="panel-head">
                 <h2>高频词禁用</h2>

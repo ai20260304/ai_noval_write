@@ -260,6 +260,62 @@ const DEFAULT_STYLE_BLEND_PROFILES = [
 
 const DEFAULT_STYLE_FUSION_GOAL = "先保剧情推进和人物动作，再保样章句式，最后叠加风趣、轻松、沙雕、对白多等人工标签；任何风格冲突都以追读和可读性为准。";
 
+const DEFAULT_WEB_LEARNING_SOURCES = [
+  { id: "fanqie-entertainment", name: "番茄娱乐圈题材页", url: "https://fanqienovel.com/keyword/2130355304", enabled: true },
+  { id: "annual-web-words", name: "年度网络用语汇总", url: "https://nlp.ccnu.edu.cn/conference/15", enabled: true },
+  { id: "xinhua-web-words", name: "新华网年度网络用语", url: "https://www.news.cn/book/20251212/83e4aed3aff145959bf5a06243280302/c.html", enabled: true },
+  { id: "bilibili-danmaku", name: "年度弹幕参考", url: "https://news.bjd.com.cn/2024/12/09/10996929.shtml", enabled: true },
+  { id: "cac-clean-language", name: "清朗合规边界", url: "https://www.cac.gov.cn/2024-10/11/c_1730337883698872.htm", enabled: true },
+];
+
+function defaultWebLearningQuery(project = {}) {
+  const title = `${project.title || ""} ${project.genre || ""} ${project.logline || ""}`;
+  if (/娱乐圈|明星|演员|综艺|热搜|顶流|女星/.test(title)) {
+    return "娱乐圈爽文 文风 热搜 综艺 打脸 爆梗 去AI味";
+  }
+  return `${project.genre || "网文"} 爽文 文风 爆款套路 章节节奏 去AI味`;
+}
+
+function normalizeWebLearningSources(sources = []) {
+  const byUrl = new Map();
+  for (const source of (Array.isArray(sources) ? sources : [])) {
+    const url = String(source?.url || "").trim();
+    if (!/^https?:\/\//i.test(url)) continue;
+    const id = String(source?.id || styleSampleHash(url)).trim();
+    byUrl.set(url.toLowerCase(), {
+      id,
+      name: String(source?.name || source?.title || url).trim(),
+      url,
+      enabled: source?.enabled !== false,
+    });
+  }
+  return [...byUrl.values()].slice(0, 20);
+}
+
+function ensureAutoWebLearning(project) {
+  if (!project) return null;
+  const current = project.autoWebLearning || {};
+  const intervalHours = Math.max(1, Math.min(168, Number(current.intervalHours) || 24));
+  const sourceSeed = current.sourcesEdited || current.sources?.length
+    ? current.sources || []
+    : DEFAULT_WEB_LEARNING_SOURCES;
+  project.autoWebLearning = {
+    enabled: Boolean(current.enabled),
+    intervalHours,
+    query: String(current.query || defaultWebLearningQuery(project)).trim(),
+    sources: normalizeWebLearningSources(sourceSeed),
+    sourcesEdited: Boolean(current.sourcesEdited),
+    lastRunAt: current.lastRunAt || "",
+    nextRunAt: current.nextRunAt || "",
+    lastStatus: current.lastStatus || "未运行",
+    lastMessage: current.lastMessage || "",
+    lastMode: current.lastMode || "",
+    updatedAt: current.updatedAt || "",
+    runs: Array.isArray(current.runs) ? current.runs.slice(-20) : [],
+  };
+  return project.autoWebLearning;
+}
+
 const ENTERTAINMENT_GOLD_FINGER_POWERS = [
   { name: "预言校准", effect: "短期事件预知从“能猜到”升级为“能校准结果”：地点、时间、对象、代价都要落成可操作信息。" },
   { name: "身体强化", effect: "预言成功后回收星运值，临时提升体能、耐力、反应、抗压和恢复，用来赶场、护人、救场、挡风险。" },
@@ -315,6 +371,7 @@ function normalizeStyleBlendProfiles(profiles = []) {
 
 function ensureStyleControls(project) {
   if (!project) return;
+  ensureAutoWebLearning(project);
   project.styleTags = Array.isArray(project.styleTags)
     ? normalizeStyleTags(project.styleTags)
     : normalizeStyleTags(DEFAULT_STYLE_TAGS);
@@ -5435,6 +5492,114 @@ function renderStyleRulesPreview(project = currentProject()) {
     .join("");
 }
 
+function renderWebLearningPanel(project = currentProject()) {
+  const config = ensureAutoWebLearning(project);
+  const enabled = $("#web-learning-enabled");
+  const query = $("#web-learning-query");
+  const sources = $("#web-learning-sources");
+  const status = $("#web-learning-status");
+  const results = $("#web-learning-results");
+  if (!config || !enabled || !query || !sources || !status || !results) return;
+  if (document.activeElement !== enabled) enabled.checked = Boolean(config.enabled);
+  if (document.activeElement !== query) query.value = config.query || defaultWebLearningQuery(project);
+  if (document.activeElement !== sources) {
+    sources.value = (config.sources || [])
+      .map((source) => `${source.enabled === false ? "# " : ""}${source.name || "来源"} | ${source.url}`)
+      .join("\n");
+  }
+  const nextText = config.nextRunAt ? ` · 下次 ${new Date(config.nextRunAt).toLocaleString("zh-CN", { hour12: false })}` : "";
+  const lastText = config.lastRunAt ? ` · 上次 ${new Date(config.lastRunAt).toLocaleString("zh-CN", { hour12: false })}` : "";
+  status.textContent = `${config.enabled ? "每日自动已开" : "手动模式"} · ${config.lastStatus || "未运行"}${lastText}${nextText}`;
+  results.innerHTML = (config.runs || []).length
+    ? config.runs.slice(-5).reverse().map((run) => `
+        <article class="production-result-item">
+          <header>
+            <strong>${escapeHtml(run.status || "学习记录")} · ${Number(run.rules || 0)} 条规则</strong>
+            <em>${run.at ? new Date(run.at).toLocaleString("zh-CN", { hour12: false }) : "-"}</em>
+          </header>
+          <p>${escapeHtml(run.message || "已抓取公开来源并更新文风规则。")}</p>
+          <em>${escapeHtml((run.sources || []).slice(0, 4).join(" / "))}${run.mode ? ` · ${escapeHtml(run.mode)}` : ""}</em>
+        </article>
+      `).join("")
+    : `<div class="production-result-item"><p>还没有联网学习记录。会只抓公开摘要、题材趋势、平台规则和你授权的来源，不自动抓整章小说正文。</p></div>`;
+}
+
+function parseWebLearningSourcesInput(text = "") {
+  return String(text || "")
+    .split(/\n+/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line, index) => {
+      const disabled = line.startsWith("#");
+      const cleaned = disabled ? line.replace(/^#\s*/, "") : line;
+      const [namePart, ...urlParts] = cleaned.split("|");
+      const rawUrl = (urlParts.join("|") || namePart || "").trim();
+      const url = rawUrl.match(/https?:\/\/\S+/i)?.[0] || "";
+      if (!url) return null;
+      return {
+        id: `custom-${index}-${styleSampleHash(url).slice(0, 6)}`,
+        name: urlParts.length ? namePart.trim() || url : url.replace(/^https?:\/\//i, "").slice(0, 32),
+        url,
+        enabled: !disabled,
+      };
+    })
+    .filter(Boolean);
+}
+
+function syncWebLearningConfigFromDom({ persist = true } = {}) {
+  const project = currentProject();
+  const config = ensureAutoWebLearning(project);
+  const enabled = $("#web-learning-enabled");
+  const query = $("#web-learning-query");
+  const sources = $("#web-learning-sources");
+  if (!config || !enabled || !query || !sources) return null;
+  const wasEnabled = Boolean(config.enabled);
+  config.enabled = Boolean(enabled.checked);
+  config.query = query.value.trim() || defaultWebLearningQuery(project);
+  config.sources = normalizeWebLearningSources(parseWebLearningSourcesInput(sources.value));
+  config.sourcesEdited = true;
+  if (config.enabled && !wasEnabled && !config.nextRunAt) {
+    config.nextRunAt = new Date(Date.now() + Number(config.intervalHours || 24) * 60 * 60 * 1000).toISOString();
+  }
+  config.updatedAt = new Date().toISOString();
+  if (persist) saveStateSoon("web-learning-config");
+  renderWebLearningPanel(project);
+  return config;
+}
+
+async function saveWebLearningSettings() {
+  syncWebLearningConfigFromDom({ persist: false });
+  await saveStateNowWithMessage("save-web-learning", "联网自动学习设置已保存。");
+}
+
+async function runWebLearningNow() {
+  const project = currentProject();
+  syncWebLearningConfigFromDom({ persist: false });
+  await saveState("before-web-learning");
+  const button = $("#run-web-learning");
+  if (button) button.disabled = true;
+  try {
+    const payload = await productionApi("/api/learning/run", {
+      method: "POST",
+      body: JSON.stringify({ projectId: project.id }),
+    });
+    const nextProject = payload.project;
+    if (nextProject) {
+      const index = state.projects.findIndex((item) => item.id === nextProject.id);
+      if (index >= 0) state.projects[index] = nextProject;
+    }
+    if (payload.updatedAt) state.loadedStateUpdatedAt = payload.updatedAt;
+    resetProductionCache();
+    renderAll();
+    showToast(`联网学习完成：新增 ${payload.result?.rules || 0} 条规则，来源 ${payload.result?.sources || 0} 个。`);
+  } catch (error) {
+    showToast(error.message || "联网学习失败");
+  } finally {
+    if (button) button.disabled = false;
+    refreshIcons();
+  }
+}
+
 function addStyleTag(tagName) {
   const project = currentProject();
   ensureStyleControls(project);
@@ -5553,6 +5718,7 @@ function renderStylePage() {
   const fusionEditor = $("#style-fusion-editor");
   if (fusionEditor) fusionEditor.innerHTML = renderStyleFusionEditor(project);
   renderStyleRulesPreview(project);
+  renderWebLearningPanel(project);
   renderForbiddenWordManager("#forbidden-words");
 }
 
@@ -8100,6 +8266,11 @@ function bindEvents() {
     event.target.value = "";
   });
   $("#train-style").addEventListener("click", () => trainStyle());
+  $("#web-learning-enabled").addEventListener("change", () => syncWebLearningConfigFromDom());
+  $("#web-learning-query").addEventListener("input", () => syncWebLearningConfigFromDom());
+  $("#web-learning-sources").addEventListener("input", () => syncWebLearningConfigFromDom());
+  $("#save-web-learning").addEventListener("click", () => saveWebLearningSettings());
+  $("#run-web-learning").addEventListener("click", () => runWebLearningNow());
   $("#style-tag-editor").addEventListener("click", (event) => {
     const addButton = event.target.closest("[data-style-tag-add]");
     if (addButton) {

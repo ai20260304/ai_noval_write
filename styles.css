@@ -2082,6 +2082,64 @@ select:focus {
   justify-self: start;
 }
 
+.auto-web-learning-panel {
+  grid-column: 1 / -1;
+}
+
+.toggle-line {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.web-learning-form {
+  display: grid;
+  grid-template-columns: minmax(220px, 0.8fr) minmax(320px, 1.2fr) auto;
+  align-items: end;
+  gap: 12px;
+  padding: 14px;
+  border-bottom: 1px solid var(--line);
+}
+
+.web-learning-form label {
+  display: grid;
+  gap: 6px;
+}
+
+.web-learning-form label span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.web-learning-form input,
+.web-learning-form textarea {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+}
+
+.web-learning-form input {
+  height: 34px;
+  padding: 0 10px;
+}
+
+.web-learning-form textarea {
+  min-height: 92px;
+  padding: 8px 10px;
+  line-height: 1.55;
+  resize: vertical;
+}
+
+.web-learning-results {
+  min-height: 88px;
+}
+
 .style-profile {
   display: grid;
   gap: 10px;
@@ -2694,5 +2752,9 @@ select:focus {
 
   .production-grid .span-6 {
     grid-column: 1 / -1;
+  }
+
+  .web-learning-form {
+    grid-template-columns: 1fr;
   }
 }

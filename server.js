@@ -174,6 +174,21 @@ db.exec(`
 
   CREATE INDEX IF NOT EXISTS idx_editor_agent_project_chapter
     ON editor_agent_runs(project_id, chapter_id);
+
+  CREATE TABLE IF NOT EXISTS web_learning_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id TEXT NOT NULL,
+    run_id TEXT NOT NULL UNIQUE,
+    status TEXT NOT NULL,
+    mode TEXT NOT NULL,
+    sources_json TEXT NOT NULL,
+    rules_json TEXT NOT NULL,
+    message TEXT NOT NULL,
+    created_at TEXT NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_web_learning_project_created
+    ON web_learning_runs(project_id, created_at);
 `);
 
 const mimeTypes = {
@@ -255,6 +270,23 @@ function backupCurrentState(reason = "before-save", now = new Date().toISOString
     db.prepare("DELETE FROM state_backups WHERE workspace = ? AND id <= ?").run(workspaceKey, stale.id);
   }
   return true;
+}
+
+function writeSavedState(state, reason = "server-update") {
+  const now = new Date().toISOString();
+  const currentRow = db
+    .prepare("SELECT state_json FROM app_state WHERE workspace = ?")
+    .get(workspaceKey);
+  if (currentRow?.state_json) backupCurrentState(reason, now);
+  db.prepare(`
+    INSERT INTO app_state (workspace, state_json, updated_at)
+    VALUES (?, ?, ?)
+    ON CONFLICT(workspace) DO UPDATE SET
+      state_json = excluded.state_json,
+      updated_at = excluded.updated_at
+  `).run(workspaceKey, JSON.stringify(state), now);
+  persistMemory(state);
+  return now;
 }
 
 function compactErrorText(value) {
@@ -809,6 +841,378 @@ function readBody(req) {
   });
 }
 
+const DEFAULT_WEB_LEARNING_SOURCES = [
+  { id: "fanqie-entertainment", name: "番茄娱乐圈题材页", url: "https://fanqienovel.com/keyword/2130355304", enabled: true },
+  { id: "annual-web-words", name: "年度网络用语汇总", url: "https://nlp.ccnu.edu.cn/conference/15", enabled: true },
+  { id: "xinhua-web-words", name: "新华网年度网络用语", url: "https://www.news.cn/book/20251212/83e4aed3aff145959bf5a06243280302/c.html", enabled: true },
+  { id: "bilibili-danmaku", name: "年度弹幕参考", url: "https://news.bjd.com.cn/2024/12/09/10996929.shtml", enabled: true },
+  { id: "cac-clean-language", name: "清朗合规边界", url: "https://www.cac.gov.cn/2024-10/11/c_1730337883698872.htm", enabled: true },
+];
+
+const webLearningRunning = new Set();
+
+function defaultWebLearningQuery(project = {}) {
+  const text = `${project.title || ""} ${project.genre || ""} ${project.logline || ""}`;
+  if (/娱乐圈|明星|演员|综艺|热搜|顶流|女星/.test(text)) return "娱乐圈爽文 文风 热搜 综艺 打脸 爆梗 去AI味";
+  return `${project.genre || "网文"} 爽文 文风 爆款套路 章节节奏 去AI味`;
+}
+
+function normalizeWebLearningSources(sources = []) {
+  const byUrl = new Map();
+  for (const source of (Array.isArray(sources) ? sources : [])) {
+    const url = String(source?.url || "").trim();
+    if (!/^https?:\/\//i.test(url)) continue;
+    const id = String(source?.id || url).trim();
+    byUrl.set(url.toLowerCase(), {
+      id,
+      name: String(source?.name || source?.title || url).trim(),
+      url,
+      enabled: source?.enabled !== false,
+    });
+  }
+  return [...byUrl.values()].slice(0, 20);
+}
+
+function ensureProjectWebLearning(project = {}) {
+  const current = project.autoWebLearning || {};
+  const sourceSeed = current.sourcesEdited || current.sources?.length
+    ? current.sources || []
+    : DEFAULT_WEB_LEARNING_SOURCES;
+  project.autoWebLearning = {
+    enabled: Boolean(current.enabled),
+    intervalHours: Math.max(1, Math.min(168, Number(current.intervalHours) || 24)),
+    query: String(current.query || defaultWebLearningQuery(project)).trim(),
+    sources: normalizeWebLearningSources(sourceSeed),
+    sourcesEdited: Boolean(current.sourcesEdited),
+    lastRunAt: current.lastRunAt || "",
+    nextRunAt: current.nextRunAt || "",
+    lastStatus: current.lastStatus || "未运行",
+    lastMessage: current.lastMessage || "",
+    lastMode: current.lastMode || "",
+    updatedAt: current.updatedAt || "",
+    runs: Array.isArray(current.runs) ? current.runs.slice(-20) : [],
+  };
+  return project.autoWebLearning;
+}
+
+function stripHtmlForLearning(html = "") {
+  return String(html || "")
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<noscript[\s\S]*?<\/noscript>/gi, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&quot;/g, "\"")
+    .replace(/&#39;/g, "'")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function titleFromHtml(html = "", fallback = "") {
+  const match = String(html || "").match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+  return stripHtmlForLearning(match?.[1] || fallback).slice(0, 80);
+}
+
+async function fetchLearningSource(source) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 12000);
+  try {
+    const response = await fetch(source.url, {
+      signal: controller.signal,
+      headers: {
+        "User-Agent": "AI-Webnovel-Workbench/1.0 (+local style learning; summaries only)",
+        Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,text/plain;q=0.8,*/*;q=0.5",
+      },
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const raw = await response.text();
+    const text = stripHtmlForLearning(raw).slice(0, 9000);
+    return {
+      id: source.id,
+      name: source.name,
+      url: source.url,
+      title: titleFromHtml(raw, source.name),
+      text,
+      ok: Boolean(text),
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function buildWebLearningPrompt(project, fetchedSources) {
+  const sources = fetchedSources.map((source, index) => [
+    `【来源${index + 1}】${source.title || source.name}`,
+    `URL：${source.url}`,
+    source.text.slice(0, 3500),
+  ].join("\n")).join("\n\n");
+  return [
+    `你是中文商业网文的文风研究员。请为项目《${project.title || "未命名"}》提炼可执行的写作规则。`,
+    "只学习公开趋势、题材套路、平台语言边界、热梗使用方式和读者反馈，不模仿某个作者，不复刻原文句子，不抽取整章小说正文。",
+    "输出 JSON，不要 Markdown。字段：rules、forbiddenWords、styleTags、sourceNotes、confidence、summary。",
+    "rules 每条都必须能直接写入章节生成提示词，格式尽量是“做什么/不要做什么/落到什么场景”。",
+    "forbiddenWords 只放高频 AI 味、模板词、过时硬梗或平台风险词。",
+    "styleTags 是 2-8 个短标签，例如：轻松、对白多、热搜反馈、综艺公开场。",
+    "",
+    `【项目主题】${project.genre || ""} ${project.logline || ""}`,
+    `【学习关键词】${project.autoWebLearning?.query || defaultWebLearningQuery(project)}`,
+    "",
+    sources,
+  ].join("\n");
+}
+
+function parseLearningModelJson(text = "") {
+  const cleaned = String(text || "")
+    .replace(/^```(?:json)?\s*/i, "")
+    .replace(/```\s*$/i, "")
+    .trim();
+  const candidates = [
+    cleaned,
+    cleaned.slice(cleaned.indexOf("{"), cleaned.lastIndexOf("}") + 1),
+  ].filter((item) => item && item.trim().startsWith("{") && item.trim().endsWith("}"));
+  for (const candidate of candidates) {
+    try {
+      return JSON.parse(candidate);
+    } catch {
+      // Try next candidate.
+    }
+  }
+  return null;
+}
+
+function fallbackLearningFromSources(project, sources, error = "") {
+  const joined = sources.map((source) => source.text).join(" ");
+  const rules = [
+    "联网学习：热梗只能放在弹幕、评论、粉丝群、营销号标题和综艺后采里，主叙述保持人话和行动推进。",
+    "联网学习：爽点必须落到可见结果，例如热搜位、试镜反馈、通告单、合同条款、镜头切换、资源座次或评论转向。",
+    "联网学习：不要整段解释题材套路；把信息放进争执、选择、曝光、撤热搜、删评、后采和电话通知里。",
+  ];
+  if (/清朗|低俗|恶俗|黑话|烂梗/.test(joined)) {
+    rules.push("联网学习：网络梗要避开低俗黑话、恶俗烂梗和攻击性表达，宁可写路人反应，也不让正文变成梗堆。");
+  }
+  if (/综艺|直播|弹幕|热搜|娱乐圈|明星/.test(joined + project.genre)) {
+    rules.push("联网学习：娱乐圈章节优先使用直播弹幕、后台监视器、品牌 brief、站姐图、通告单和热搜词条做反馈。");
+  }
+  return {
+    rules,
+    forbiddenWords: ["全网炸了", "杀疯了", "封神", "气场全开", "命运齿轮", "空气凝固"],
+    styleTags: /娱乐圈|明星|演员|综艺/.test(`${project.genre || ""}${project.title || ""}`)
+      ? ["热搜反馈", "综艺公开场", "评论区反转"]
+      : ["节奏快", "结果可见", "少解释"],
+    sourceNotes: sources.map((source) => ({
+      title: source.title || source.name,
+      url: source.url,
+      summary: source.text.slice(0, 180),
+    })),
+    confidence: error ? 58 : 68,
+    summary: error ? `模型蒸馏失败，已使用本地规则提取：${error}` : "已使用本地规则提取公开来源趋势。",
+  };
+}
+
+function normalizeLearningResult(project, raw, sources, mode) {
+  const asArray = (value) => Array.isArray(value)
+    ? value.map((item) => String(item || "").trim()).filter(Boolean)
+    : typeof value === "string"
+      ? value.split(/\n+|；|;/).map((item) => item.trim()).filter(Boolean)
+      : [];
+  const notes = Array.isArray(raw?.sourceNotes) ? raw.sourceNotes : sources.map((source) => ({
+    title: source.title || source.name,
+    url: source.url,
+    summary: source.text.slice(0, 180),
+  }));
+  return {
+    rules: asArray(raw?.rules).slice(0, 12),
+    forbiddenWords: asArray(raw?.forbiddenWords).slice(0, 30),
+    styleTags: asArray(raw?.styleTags).slice(0, 8),
+    sourceNotes: notes.slice(0, 8),
+    confidence: Math.max(0, Math.min(100, Number(raw?.confidence) || (mode === "model" ? 76 : 62))),
+    summary: String(raw?.summary || "已完成公开来源学习。").slice(0, 300),
+    mode,
+  };
+}
+
+function applyWebLearningToProject(project, learning, fetchedSources, modelMeta = null) {
+  const now = new Date().toISOString();
+  const config = ensureProjectWebLearning(project);
+  const rules = learning.rules.map((rule) => rule.startsWith("联网学习") ? rule : `联网学习：${rule}`);
+  project.webLearnedRules = Array.from(new Set([...(project.webLearnedRules || []), ...rules])).slice(-80);
+  project.learnedRules = Array.from(new Set([...(project.learnedRules || []), ...rules])).slice(-120);
+  project.forbiddenWords = Array.from(new Set([...(project.forbiddenWords || []), ...learning.forbiddenWords])).slice(0, 260);
+  const existingTags = new Set((project.styleTags || []).map((tag) => tag.name));
+  project.styleTags = [
+    ...(project.styleTags || []),
+    ...learning.styleTags.filter((tag) => !existingTags.has(tag)).map((name) => ({ name, enabled: true })),
+  ].slice(0, 40);
+  project.styleStatus = project.styleStatus === "已训练" ? "已训练" : "联网学习已更新";
+  project.styleConfidence = Math.max(Number(project.styleConfidence || 0), Math.min(88, learning.confidence));
+  project.health = project.health || {};
+  project.health.style = Math.max(Number(project.health.style || 0), project.styleConfidence);
+  project.webLearningUpdatedAt = now;
+  project.webLearningSourceNotes = learning.sourceNotes;
+  project.webLearningSummary = learning.summary;
+  if (modelMeta) project.webLearningLlmMeta = modelMeta;
+
+  const nextRun = new Date(Date.now() + Number(config.intervalHours || 24) * 60 * 60 * 1000).toISOString();
+  const run = {
+    at: now,
+    status: "完成",
+    mode: learning.mode,
+    rules: rules.length,
+    sources: fetchedSources.map((source) => source.title || source.name).filter(Boolean),
+    message: learning.summary,
+  };
+  config.lastRunAt = now;
+  config.nextRunAt = nextRun;
+  config.lastStatus = "完成";
+  config.lastMessage = learning.summary;
+  config.lastMode = learning.mode;
+  config.runs = (config.runs || []).concat(run).slice(-20);
+  config.updatedAt = now;
+  return run;
+}
+
+async function runWebLearningForProject(state, projectId, { manual = false } = {}) {
+  const project = exactProjectById(state, projectId || "");
+  if (!project) throw new Error("未找到项目");
+  const config = ensureProjectWebLearning(project);
+  const enabledSources = (config.sources || []).filter((source) => source.enabled !== false).slice(0, 8);
+  if (!enabledSources.length) throw new Error("没有启用的联网学习来源");
+  const runningKey = String(project.id || projectId);
+  if (webLearningRunning.has(runningKey)) throw new Error("该项目的联网学习正在运行");
+  webLearningRunning.add(runningKey);
+  try {
+    const fetched = [];
+    const failed = [];
+    for (const source of enabledSources) {
+      try {
+        const result = await fetchLearningSource(source);
+        if (result.ok) fetched.push(result);
+      } catch (error) {
+        failed.push(`${source.name}: ${compactErrorText(error.message || error)}`);
+      }
+    }
+    if (!fetched.length) throw new Error(`所有来源抓取失败：${failed.join("；") || "无返回"}`);
+
+    let learning;
+    let modelMeta = null;
+    try {
+      const prompt = buildWebLearningPrompt(project, fetched);
+      const modelResult = await callModel({ state, task: "文风学习", prompt, targetWords: 900 });
+      const parsed = parseLearningModelJson(modelResult.text);
+      learning = normalizeLearningResult(project, parsed || fallbackLearningFromSources(project, fetched, "模型未返回 JSON"), fetched, parsed ? "model" : "fallback");
+      modelMeta = {
+        provider: modelResult.provider?.name || "",
+        model: modelResult.model || "",
+        usage: modelResult.usage || {},
+        task: modelResult.route?.task || "文风学习",
+      };
+    } catch (error) {
+      learning = normalizeLearningResult(project, fallbackLearningFromSources(project, fetched, error.message), fetched, "fallback");
+    }
+
+    const run = applyWebLearningToProject(project, learning, fetched, modelMeta);
+    const runId = `web-learn-${project.id}-${Date.now().toString(36)}`;
+    db.prepare(`
+      INSERT INTO web_learning_runs (project_id, run_id, status, mode, sources_json, rules_json, message, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      project.id,
+      runId,
+      "完成",
+      learning.mode,
+      JSON.stringify(fetched.map((source) => ({ title: source.title, url: source.url }))),
+      JSON.stringify(learning.rules),
+      learning.summary,
+      run.at,
+    );
+    return {
+      project,
+      run,
+      rules: learning.rules.length,
+      sources: fetched.length,
+      failed,
+      mode: learning.mode,
+      manual,
+    };
+  } finally {
+    webLearningRunning.delete(runningKey);
+  }
+}
+
+function markWebLearningFailure(state, projectId, error, { manual = false } = {}) {
+  const project = exactProjectById(state, projectId || "");
+  if (!project) return null;
+  const config = ensureProjectWebLearning(project);
+  const now = new Date().toISOString();
+  const message = compactErrorText(error?.message || error || "联网学习失败");
+  const nextDelayHours = manual ? Number(config.intervalHours || 24) : Math.min(6, Number(config.intervalHours || 24));
+  const nextRunAt = new Date(Date.now() + Math.max(1, nextDelayHours) * 60 * 60 * 1000).toISOString();
+  const run = {
+    at: now,
+    status: "失败",
+    mode: "error",
+    rules: 0,
+    sources: [],
+    message,
+  };
+  config.lastRunAt = now;
+  config.nextRunAt = nextRunAt;
+  config.lastStatus = "失败";
+  config.lastMessage = message;
+  config.lastMode = "error";
+  config.runs = (config.runs || []).concat(run).slice(-20);
+  config.updatedAt = now;
+  db.prepare(`
+    INSERT OR IGNORE INTO web_learning_runs (project_id, run_id, status, mode, sources_json, rules_json, message, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    project.id,
+    `web-learn-fail-${project.id}-${Date.now().toString(36)}`,
+    "失败",
+    "error",
+    "[]",
+    "[]",
+    message,
+    now,
+  );
+  return { project, run, message, manual };
+}
+
+async function runDueWebLearningJobs({ force = false } = {}) {
+  const state = readSavedState();
+  if (!state?.projects?.length) return { ok: true, ran: 0, failed: 0 };
+  const now = Date.now();
+  let ran = 0;
+  let failed = 0;
+  let changed = false;
+  for (const project of state.projects || []) {
+    const config = ensureProjectWebLearning(project);
+    if (!config.enabled) continue;
+    const dueTime = config.nextRunAt ? Date.parse(config.nextRunAt) : 0;
+    if (!dueTime && !force) {
+      config.nextRunAt = new Date(now + Number(config.intervalHours || 24) * 60 * 60 * 1000).toISOString();
+      config.updatedAt = new Date().toISOString();
+      changed = true;
+      continue;
+    }
+    if (!force && dueTime && dueTime > now) continue;
+    try {
+      await runWebLearningForProject(state, project.id, { manual: false });
+      ran += 1;
+      changed = true;
+    } catch (error) {
+      markWebLearningFailure(state, project.id, error, { manual: false });
+      failed += 1;
+      changed = true;
+    }
+  }
+  if (changed) writeSavedState(state, "web-learning-auto");
+  return { ok: true, ran, failed };
+}
+
 function memoryRowsFromState(state) {
   const rows = [];
   for (const project of state.projects || []) {
@@ -895,6 +1299,33 @@ function memoryRowsFromState(state) {
         kind: "style",
         ref: "learned-rule",
         content: rule,
+      });
+    }
+
+    for (const rule of project.webLearnedRules || []) {
+      rows.push({
+        projectId,
+        kind: "style",
+        ref: "web-learned-rule",
+        content: rule,
+      });
+    }
+
+    for (const note of project.webLearningSourceNotes || []) {
+      rows.push({
+        projectId,
+        kind: "research",
+        ref: note.url || note.title || "web-learning-source",
+        content: JSON.stringify(note),
+      });
+    }
+
+    if (project.webLearningSummary) {
+      rows.push({
+        projectId,
+        kind: "research",
+        ref: "web-learning-summary",
+        content: project.webLearningSummary,
       });
     }
 
@@ -2109,6 +2540,12 @@ function projectById(state, projectId = "") {
   return (state?.projects || []).find((project) => project.id === projectId) || (state?.projects || [])[0] || null;
 }
 
+function exactProjectById(state, projectId = "") {
+  const id = String(projectId || "");
+  if (!id) return null;
+  return (state?.projects || []).find((project) => String(project.id || "") === id) || null;
+}
+
 function regressionIssuesForProject(project = {}) {
   const issues = [];
   const chapters = project.chapters || [];
@@ -2290,6 +2727,14 @@ function buildProductionSummary(projectId = "") {
     .map((run) => ({ ...run, cases: JSON.parse(run.cases_json || "[]"), cases_json: undefined }));
   const agentRuns = all("SELECT run_id, chapter_id, rounds_json, status, created_at FROM editor_agent_runs WHERE project_id = ? ORDER BY id DESC LIMIT 4", id)
     .map((run) => ({ ...run, rounds: JSON.parse(run.rounds_json || "[]"), rounds_json: undefined }));
+  const webLearningRuns = all("SELECT run_id, status, mode, sources_json, rules_json, message, created_at FROM web_learning_runs WHERE project_id = ? ORDER BY id DESC LIMIT 8", id)
+    .map((run) => ({
+      ...run,
+      sources: JSON.parse(run.sources_json || "[]"),
+      rules: JSON.parse(run.rules_json || "[]"),
+      sources_json: undefined,
+      rules_json: undefined,
+    }));
   return {
     projectId: id,
     title: project?.title || "",
@@ -2301,6 +2746,7 @@ function buildProductionSummary(projectId = "") {
       promptVersions: one("SELECT COUNT(*) AS count FROM prompt_versions WHERE project_id = ?", id).count || 0,
       regressionRuns: one("SELECT COUNT(*) AS count FROM regression_runs WHERE project_id = ?", id).count || 0,
       editorAgentRuns: one("SELECT COUNT(*) AS count FROM editor_agent_runs WHERE project_id = ?", id).count || 0,
+      webLearningRuns: one("SELECT COUNT(*) AS count FROM web_learning_runs WHERE project_id = ?", id).count || 0,
     },
     latestRegression: latestRegression.run_id ? { runId: latestRegression.run_id, status: latestRegression.status, score: latestRegression.score, createdAt: latestRegression.created_at } : null,
     latestPromptEval: latestEval.eval_id ? { evalId: latestEval.eval_id, promptId: latestEval.prompt_id, score: latestEval.score, createdAt: latestEval.created_at } : null,
@@ -2319,6 +2765,7 @@ function buildProductionSummary(projectId = "") {
     regressionRuns,
     evalRuns,
     agentRuns,
+    webLearningRuns,
   };
 }
 
@@ -2548,6 +2995,49 @@ async function handleApi(req, res) {
     return;
   }
 
+  if (req.method === "POST" && url.pathname === "/api/learning/run") {
+    const payload = JSON.parse(await readBody(req) || "{}");
+    const state = readSavedState();
+    if (!state) {
+      sendJson(res, 400, { ok: false, error: "本地数据库还没有保存项目状态" });
+      return;
+    }
+    const project = exactProjectById(state, payload.projectId || "");
+    if (!project) {
+      sendJson(res, 404, { ok: false, error: "未找到项目" });
+      return;
+    }
+    try {
+      const result = await runWebLearningForProject(state, project.id, { manual: true });
+      const updatedAt = writeSavedState(state, "web-learning-run");
+      sendJson(res, 200, {
+        ok: true,
+        result: {
+          rules: result.rules,
+          sources: result.sources,
+          failed: result.failed,
+          mode: result.mode,
+          manual: result.manual,
+        },
+        project: result.project,
+        run: result.run,
+        updatedAt,
+        summary: buildProductionSummary(project.id),
+      });
+    } catch (error) {
+      const failure = markWebLearningFailure(state, project.id, error, { manual: true });
+      const updatedAt = writeSavedState(state, "web-learning-failure");
+      sendJson(res, 400, {
+        ok: false,
+        error: compactErrorText(error.message || error || "联网学习失败"),
+        project: failure?.project || project,
+        run: failure?.run || null,
+        updatedAt,
+      });
+    }
+    return;
+  }
+
   if (req.method === "POST" && url.pathname === "/api/llm/generate") {
     const payload = JSON.parse(await readBody(req) || "{}");
     const state = readSavedState();
@@ -2719,3 +3209,11 @@ server.listen(port, "127.0.0.1", () => {
   console.log(`AI webnovel workbench service running at http://127.0.0.1:${port}`);
   console.log(`SQLite database: ${dbPath}`);
 });
+
+const webLearningIntervalMs = 10 * 60 * 1000;
+const webLearningTimer = setInterval(() => {
+  runDueWebLearningJobs().catch((error) => {
+    console.warn(`Auto web learning failed: ${error.message || error}`);
+  });
+}, webLearningIntervalMs);
+webLearningTimer.unref?.();
