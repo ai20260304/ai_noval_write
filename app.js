@@ -265,6 +265,7 @@ const HUMAN_WRITING_CORE_RULES = [
   "每一场先锁住四件事：谁想要什么，谁挡住他，输掉会付出什么代价，这一场结束后局面发生什么变化。",
   "人物心理只写当下的算盘、害怕、舍不得、误判和底线；心理后面必须立刻接动作、台词或选择。",
   "场景细节最多保留一到两个会影响人物选择的东西；不要写房间、桌椅、窗户、墙面、物品清单来凑字数。",
+  "不要用低价值感官细节凑苦日子：馒头干、喉咙发噎、温水有塑料味、冷饭发硬这类只说明难受的句子要删。贫穷和窘迫必须落到选择上：交不起房租、要不要收钱、怕被赶走、错过机会、被人当面压价。",
   "少写作者总结句。不要替读者宣布震惊、复杂、命运、注定、全网炸了，直接写电话、合同、热搜、通告、系统数值、对手反应或角色动作。",
   "对白要有目的：逼问、试探、遮掩、交易、顶回去、认输或下决定；不要闲聊式解释设定。",
   "一段至少推进一小步：信息变化、关系变化、资源变化、反噬变化、信任变化、误会加深或新麻烦落地。",
@@ -5883,6 +5884,9 @@ function buildChapterFixPlan(chapter) {
   if (styleMetrics.summaryHits > 0 || (chapter?.scoreDetail?.style || 0) < 80) {
     plan.push(`减少“仿佛/好像/不禁”类解释句，改成欲望、顾虑、动作、台词和结果。`);
   }
+  if (styleMetrics.sensoryPaddingHits > 0) {
+    plan.push("删掉干馒头、温水塑料味、喉咙发噎这类低价值感官凑字，改成房租、机会、脸面、信任或反噬带来的选择压力。");
+  }
   if (styleMetrics.inventoryPileHits > 0 || issues.some((issue) => issue.type === "AI味")) {
     plan.push("删掉场景物品清单，只留 1-2 个会改变人物选择的细节，把篇幅让给人物心理拉扯和决定。");
   }
@@ -6022,6 +6026,9 @@ function buildProjectAudit(project) {
   const inventoryPileChapters = chapters
     .filter((chapter) => chapter.manuscript && sceneInventoryPileCount(chapter.manuscript) > 0)
     .slice(0, 4);
+  const sensoryPaddingChapters = chapters
+    .filter((chapter) => chapter.manuscript && lowValueSensoryPaddingCount(chapter.manuscript) > 0)
+    .slice(0, 4);
   const forbiddenHitChapters = chapters
     .map((chapter) => ({
       chapter,
@@ -6046,6 +6053,9 @@ function buildProjectAudit(project) {
   }
   if (inventoryPileChapters.length) {
     rows.push({ type: "AI味", pos: inventoryPileChapters.map((chapter) => `第${chapter.id}章`).join("、"), issue: "存在场景物品清单式描写，人物心理和选择不足。", level: "中", fix: "删掉静态陈设堆叠，补人物的欲望、顾虑、误判和下一步动作。" });
+  }
+  if (sensoryPaddingChapters.length) {
+    rows.push({ type: "AI味", pos: sensoryPaddingChapters.map((chapter) => `第${chapter.id}章`).join("、"), issue: "存在低价值感官细节凑字，贫穷或窘迫没有落到人物选择。", level: "中", fix: "删掉口感、喉咙、水味这类空转细节，改写成钱、机会、脸面、信任或反噬压力。" });
   }
   if (forbiddenHitChapters.length) {
     const first = forbiddenHitChapters[0];
@@ -6075,7 +6085,7 @@ function buildProjectAudit(project) {
     [reviewChapters.length ? "warn" : "ok", "审查队列", "章节审查", reviewChapters.length ? `${reviewChapters.length} 章待处理` : "无待审章节"],
     [doneChapters.length ? "ok" : "warn", "完成队列", "完成功能", doneChapters.length ? `${doneChapters.length} 章已完成` : "暂无完成章"],
     [roleRisk.length ? "warn" : "ok", "角色表", "缺席风险", roleRisk.length ? `${roleRisk.length} 个中高风险角色` : "角色风险稳定"],
-    [forbiddenHitChapters.length || inventoryPileChapters.length ? "warn" : "ok", "正文", "AI味扫描", forbiddenHitChapters.length || inventoryPileChapters.length ? "发现模板词或物品堆叠" : "未发现主要模板词"],
+    [forbiddenHitChapters.length || inventoryPileChapters.length || sensoryPaddingChapters.length ? "warn" : "ok", "正文", "AI味扫描", forbiddenHitChapters.length || inventoryPileChapters.length || sensoryPaddingChapters.length ? "发现模板词、物品堆叠或感官凑字" : "未发现主要模板词"],
   ];
 
   return { rows, timeline };
@@ -6986,6 +6996,18 @@ function sceneInventoryPileCount(text = "") {
   }).length;
 }
 
+function lowValueSensoryPaddingCount(text = "") {
+  const sensoryWords = ["干", "糙", "剌嗓子", "发噎", "噎", "咽下去", "喉咙", "灌了一口", "温的", "塑料味", "冷饭", "发硬", "馒头", "矿泉水", "半瓶水", "泡面汤"];
+  const choiceWords = ["房租", "七块", "钱", "交不起", "赶走", "机会", "试镜", "通告", "合同", "热搜", "系统", "反噬", "信任", "预言", "收钱", "压价"];
+  return draftParagraphs(text).filter((paragraph) => {
+    const sensoryHits = countKeywordHits(paragraph, sensoryWords);
+    if (sensoryHits < 3) return false;
+    const choiceHits = countKeywordHits(paragraph, choiceWords);
+    const sentenceCount = draftSentences(paragraph).length;
+    return choiceHits === 0 || sentenceCount >= 3;
+  }).length;
+}
+
 function draftStyleMetrics(text = "") {
   const paragraphs = draftParagraphs(text);
   const sentences = draftSentences(text);
@@ -7005,6 +7027,7 @@ function draftStyleMetrics(text = "") {
     summaryHits: countKeywordHits(text, ["复杂", "情绪", "仿佛", "似乎", "不禁", "忍不住", "莫名", "说不清道不明", "心中涌起", "眼神中闪过"]),
     innerChoiceHits: countKeywordHits(text, ["怕", "想", "不敢", "舍不得", "后悔", "赌", "忍", "认输", "翻身", "尊严", "底线", "顾虑", "算计", "退路", "机会"]),
     inventoryPileHits: sceneInventoryPileCount(text),
+    sensoryPaddingHits: lowValueSensoryPaddingCount(text),
   };
 }
 
@@ -7079,6 +7102,9 @@ function auditChapterDraft(project, chapter) {
   if (styleMetrics.inventoryPileHits) {
     issues.push({ type: "AI味", level: "中", text: `发现 ${styleMetrics.inventoryPileHits} 段场景物品清单式描写。`, fix: "删掉多数静态物品，只保留会影响人物选择的细节，补角色的欲望、顾虑和下一步动作。" });
   }
+  if (styleMetrics.sensoryPaddingHits) {
+    issues.push({ type: "AI味", level: "中", text: `发现 ${styleMetrics.sensoryPaddingHits} 段低价值感官细节凑字。`, fix: "删掉“干、糙、剌嗓子、塑料味”等只说明难受的句子，改成钱、房租、机会、脸面、信任或反噬带来的选择压力。" });
+  }
   if (styleMetrics.summaryHits >= 5 && styleMetrics.summaryHits > styleMetrics.innerChoiceHits) {
     issues.push({ type: "AI味", level: "中", text: `解释腔和抽象情绪词偏多：${styleMetrics.summaryHits} 处。`, fix: "把“他知道/这意味着/复杂情绪/仿佛似乎”改成人物当下的算盘、误判、台词和动作结果。" });
   }
@@ -7122,6 +7148,7 @@ function auditChapterDraft(project, chapter) {
       - metaHits.length * 14
       - Math.min(14, styleMetrics.summaryHits * 2)
       - Math.min(12, styleMetrics.inventoryPileHits * 6)
+      - Math.min(12, styleMetrics.sensoryPaddingHits * 6)
       - Math.min(10, sentenceGap)
       - Math.min(8, dialogueGap / 2)
       + Math.min(8, actionDensity),
@@ -7159,7 +7186,7 @@ function auditChapterDraft(project, chapter) {
           ? `字数不足：${wordCount}（下限 ${hardMin}）`
           : `字数超限：${wordCount}（上限 ${hardMax}）`,
       `细纲覆盖：${outlineCoverage.hit}/${outlineCoverage.total}；角色覆盖：${Math.round(roleCoverage * 100)}%；伏笔覆盖：${Math.round(clueCoverage * 100)}%。`,
-      `文风指标：均句 ${styleMetrics.avgSentence} 字，对话 ${styleMetrics.dialogueRatio}%，动作词 ${styleMetrics.actionHits}，心理选择词 ${styleMetrics.innerChoiceHits}，解释词 ${styleMetrics.summaryHits}，物品堆叠 ${styleMetrics.inventoryPileHits} 段。`,
+      `文风指标：均句 ${styleMetrics.avgSentence} 字，对话 ${styleMetrics.dialogueRatio}%，动作词 ${styleMetrics.actionHits}，心理选择词 ${styleMetrics.innerChoiceHits}，解释词 ${styleMetrics.summaryHits}，物品堆叠 ${styleMetrics.inventoryPileHits} 段，感官凑字 ${styleMetrics.sensoryPaddingHits} 段。`,
       issues.length ? `审查发现 ${issues.length} 项问题，高风险 ${highIssues} 项。` : "审查通过：未发现明显结构、禁词、尺度和伏笔问题。",
       midIssues ? `中风险 ${midIssues} 项，完成前建议修一遍。` : "中风险 0 项。",
     ],
