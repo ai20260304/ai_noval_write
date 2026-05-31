@@ -260,6 +260,29 @@ const DEFAULT_STYLE_BLEND_PROFILES = [
 
 const DEFAULT_STYLE_FUSION_GOAL = "先保剧情推进和人物动作，再保样章句式，最后叠加风趣、轻松、沙雕、对白多等人工标签；任何风格冲突都以追读和可读性为准。";
 
+const HUMAN_WRITING_CORE_RULES = [
+  "只输出小说正文，不输出标题、提纲、规则说明、审查报告或 Markdown。",
+  "每一场先锁住四件事：谁想要什么，谁挡住他，输掉会付出什么代价，这一场结束后局面发生什么变化。",
+  "人物心理只写当下的算盘、害怕、舍不得、误判和底线；心理后面必须立刻接动作、台词或选择。",
+  "场景细节最多保留一到两个会影响人物选择的东西；不要写房间、桌椅、窗户、墙面、物品清单来凑字数。",
+  "少写作者总结句。不要替读者宣布震惊、复杂、命运、注定、全网炸了，直接写电话、合同、热搜、通告、系统数值、对手反应或角色动作。",
+  "对白要有目的：逼问、试探、遮掩、交易、顶回去、认输或下决定；不要闲聊式解释设定。",
+  "一段至少推进一小步：信息变化、关系变化、资源变化、反噬变化、信任变化、误会加深或新麻烦落地。",
+];
+
+function humanWritingRules(project = currentProject(), chapter = selectedChapter(), detail = null) {
+  const roles = (chapter?.roles || []).filter(Boolean).slice(0, 4);
+  const sceneTitles = (detail?.scenes || []).map((scene) => scene.title).filter(Boolean).slice(0, 5);
+  return [
+    ...HUMAN_WRITING_CORE_RULES,
+    roles.length ? `本章角色必须有自己的小算盘：${roles.join("、")}。不要只让角色站着听主角解释。` : "",
+    sceneTitles.length ? `本章每个场景都要落结果：${sceneTitles.join(" / ")}。` : "",
+    isEntertainmentProject(project)
+      ? "娱乐圈爽点优先落在可见反馈里：试镜结果、后台监视器、品牌 brief、通告单、热搜词条、站姐图、评论区转向、宣发群消息。"
+      : "",
+  ].filter(Boolean);
+}
+
 const DEFAULT_WEB_LEARNING_SOURCES = [
   { id: "fanqie-entertainment", name: "番茄娱乐圈题材页", url: "https://fanqienovel.com/keyword/2130355304", enabled: true },
   { id: "annual-web-words", name: "年度网络用语汇总", url: "https://nlp.ccnu.edu.cn/conference/15", enabled: true },
@@ -429,10 +452,11 @@ function styleFusionRules(project) {
   ];
 }
 
-function deepSeekDeAiRules(project) {
+function deepSeekDeAiRules(project, { limit = Infinity } = {}) {
   ensureStyleControls(project);
   return (project?.deepseekDeAiPromptLibrary || DEEPSEEK_DE_AI_PROMPT_LIBRARY)
     .filter((item) => item && item.title !== "DeepSeek 参数建议")
+    .slice(0, limit)
     .map((item) => `DeepSeek去AI味｜${item.title}：${item.prompt}`);
 }
 
@@ -1208,7 +1232,7 @@ function combinedGenerationRules(project) {
   const wordRules = generationWordRules(project?.chapterTargetWords || 2200);
   const fusionRules = styleFusionRules(project);
   const tagRules = styleTagRules(project);
-  const deepSeekRules = deepSeekDeAiRules(project);
+  const deepSeekRules = deepSeekDeAiRules(project, { limit: 2 });
   const entertainmentRules = entertainmentStyleRules(project);
   const learned = Array.isArray(project?.learnedRules) ? project.learnedRules : [];
   const revisionRules = (project?.styleRevisionSamples || []).length
@@ -1903,7 +1927,8 @@ function buildChapterGenerationPrompt(project, chapter, detail) {
   const contract = buildChapterGenerationContract(project, chapter);
   const goldFingerRules = buildGoldFingerRules(project);
   const continuity = buildChapterContinuityMemory(project, chapter);
-  const deepSeekRules = deepSeekDeAiRules(project);
+  const humanRules = humanWritingRules(project, chapter, detail);
+  const deepSeekRules = deepSeekDeAiRules(project, { limit: 4 });
   const sceneLines = (detail?.scenes || [])
     .map((scene, index) => {
       const systemLines = (scene.systemLines || []).length ? `（系统线：${scene.systemLines.join("；")}）` : "";
@@ -1913,8 +1938,15 @@ function buildChapterGenerationPrompt(project, chapter, detail) {
   return [
     `你是中文网文正文生成模型。请为《${project.title}》生成第 ${chapter.id} 章《${chapter.title}》。`,
     "",
+    "【输出格式】",
+    "只输出小说正文，不输出标题、提纲、分析、规则说明、审查报告、项目术语或 Markdown。",
+    "正文里禁止出现“细纲、粗纲、写法、节点、规则、RAG、提示词、审查”等工作台词。",
+    "",
     "【硬性约束】",
     ...contract,
+    "",
+    "【真人作者写法】",
+    ...humanRules,
     "",
     "【连续性记忆】",
     ...(continuity.carry.length ? continuity.carry : ["上一章结尾：无"]),
@@ -1966,7 +1998,8 @@ function buildChapterFixPrompt(project, chapter, issues = []) {
   const contract = buildChapterGenerationContract(project, chapter);
   const continuity = buildChapterContinuityMemory(project, chapter);
   const goldFingerRules = buildGoldFingerRules(project);
-  const deepSeekRules = deepSeekDeAiRules(project);
+  const humanRules = humanWritingRules(project, chapter, detail);
+  const deepSeekRules = deepSeekDeAiRules(project, { limit: 6 });
   const fixPlan = buildChapterFixPlan(chapter);
   const targetWords = activeTargetWords(project, chapter);
   const manuscript = cleanGeneratedDraft(chapter.manuscript || "");
@@ -1980,6 +2013,9 @@ function buildChapterFixPrompt(project, chapter, issues = []) {
     "这是修稿任务，不是重新开一章。保留已经成立的剧情顺序、人物认知、数值状态和章末承接，只修有问题的地方。",
     `目标字数：${targetWords} 字左右，硬性合格区间 2200-3000 字，优先落在 2400-2800 字。`,
     "必须逐项修复下面所有审查问题；如果某一项需要删情节，就用细纲内已有事实补足，不要凭空新增胎记、秘密、金额、亲密桥段或未铺垫设定。",
+    "",
+    "【真人作者写法】",
+    ...humanRules,
     "",
     "【本次必须修复】",
     ...(issues.length ? issues.map(formatReviewIssueForPrompt) : ["无明确问题时，仅做轻度去 AI 味和连续性校准。"]),
@@ -7042,6 +7078,12 @@ function auditChapterDraft(project, chapter) {
   }
   if (styleMetrics.inventoryPileHits) {
     issues.push({ type: "AI味", level: "中", text: `发现 ${styleMetrics.inventoryPileHits} 段场景物品清单式描写。`, fix: "删掉多数静态物品，只保留会影响人物选择的细节，补角色的欲望、顾虑和下一步动作。" });
+  }
+  if (styleMetrics.summaryHits >= 5 && styleMetrics.summaryHits > styleMetrics.innerChoiceHits) {
+    issues.push({ type: "AI味", level: "中", text: `解释腔和抽象情绪词偏多：${styleMetrics.summaryHits} 处。`, fix: "把“他知道/这意味着/复杂情绪/仿佛似乎”改成人物当下的算盘、误判、台词和动作结果。" });
+  }
+  if (wordCount > 1200 && styleMetrics.innerChoiceHits < 3 && styleMetrics.dialogueRatio < 18) {
+    issues.push({ type: "AI味", level: "中", text: "人物内心选择和有效对白偏少，正文容易像事件流水账。", fix: "每个主要场景补一处人物不敢退、不得不赌、怕失去什么的心理拉扯，并用一句台词或动作落地。" });
   }
   if (explicitScaleRisk || underageRomanceRisk) {
     issues.push({ type: "尺度", level: "高", text: "存在平台尺度或未成年感情风险。", fix: "只保留成年人自愿、留白和关系后果；未成年只写事业守护。" });
